@@ -7,9 +7,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Keyboar
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ChatMemberHandler
 
 # --- Configuration using Environment Variables for Security ---
-BOT_TOKEN = os.environ.get("7950170561:AAER-L3TyzKll--bl4n7FyPVxLxsFju6wSs")
-SUPABASE_URL = os.environ.get("https://jofxsqsgarvzolgphqjg.supabase.co")
-SUPABASE_KEY = os.environ.get("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg")
+BOT_TOKEN ="7950170561:AAER-L3TyzKll--bl4n7FyPVxLxsFju6wSs"
+SUPABASE_URL ="https://jofxsqsgarvzolgphqjg.supabase.co"
+SUPABASE_KEY ="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
 
 # --- Static IDs ---
 CHANNEL_ID = -1002686156311
