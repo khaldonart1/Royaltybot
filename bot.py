@@ -2,14 +2,16 @@ import os
 import random
 import json
 import datetime
+import asyncio
 from supabase import create_client, Client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, ChatMemberUpdated
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ChatMemberHandler
 
-# --- Configuration using Environment Variables for Security ---
-BOT_TOKEN ="7950170561:AAER-L3TyzKll--bl4n7FyPVxLxsFju6wSs"
-SUPABASE_URL ="https://jofxsqsgarvzolgphqjg.supabase.co"
-SUPABASE_KEY ="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
+# --- Configuration ---
+# !!! استبدل هذه القيم بالقيم الحقيقية والسرية الخاصة بك !!!
+BOT_TOKEN = "7950170561:AAER-L3TyzKll--bl4n7FyPVxLxsFju6wSs"
+SUPABASE_URL = "https://jofxsqsgarvzolgphqjg.supabase.co" 
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
 
 # --- Static IDs ---
 CHANNEL_ID = -1002686156311
@@ -18,9 +20,6 @@ BOT_OWNER_IDS = [596472053, 7164133014, 1971453570]
 ALLOWED_COUNTRY_CODES = ["213", "973", "269", "253", "20", "964", "962", "965", "961", "218", "222", "212", "968", "970", "974", "966", "252", "249", "963", "216", "971", "967"]
 
 # --- Initialize Supabase Client ---
-if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY]):
-    print("FATAL: Missing required environment variables (BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY).")
-    exit()
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     print("Successfully connected to Supabase.")
@@ -57,7 +56,7 @@ def update_user_in_db(user_id, data_to_update):
 
 def get_all_users_sorted_by(column="real_referrals"):
     try:
-        res = supabase.table('users').select("user_id, full_name, real_referrals, fake_referrals").order(column, desc=True).execute()
+        res = supabase.table('users').select("user_id, full_name, real_referrals, fake_referrals, is_verified").order(column, desc=True).execute()
         return res.data or []
     except Exception: return []
 
@@ -79,9 +78,7 @@ def delete_referral_mapping(referred_id):
     
 def reset_all_referrals_in_db():
     try:
-        all_users = get_all_users_sorted_by()
-        for user in all_users:
-            update_user_in_db(user['user_id'], {"real_referrals": 0, "fake_referrals": 0})
+        supabase.table('users').update({"real_referrals": 0, "fake_referrals": 0}).gt('user_id', 0).execute()
         supabase.table('referrals').delete().gt('referred_user_id', 0).execute()
         print("All referrals have been reset.")
     except Exception as e: print(f"DB_ERROR: Resetting all referrals: {e}")
@@ -132,6 +129,7 @@ def get_admin_panel_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("تقرير الإحالات الحقيقية", callback_data="admin_report_real")],
                                  [InlineKeyboardButton("تقرير الإحالات الوهمية", callback_data="admin_report_fake")],
                                  [InlineKeyboardButton("🏆 اختيار فائز عشوائي", callback_data="pick_winner")],
+                                 [InlineKeyboardButton("📢 إرسال رسالة للجميع", callback_data="admin_broadcast")],
                                  [InlineKeyboardButton("⚠️ تصفير كل الإحالات ⚠️", callback_data="admin_reset_all")],
                                  [InlineKeyboardButton("➡️ العودة للقائمة الرئيسية", callback_data="main_menu")]])
 def get_reset_confirmation_keyboard():
@@ -187,7 +185,7 @@ async def ask_math_question(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def handle_verification_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if update.effective_chat.type != 'private': return
-    if user_id in BOT_OWNER_IDS and context.user_data.get('state') == 'awaiting_winner_threshold':
+    if user_id in BOT_OWNER_IDS and context.user_data.get('state'):
         await handle_admin_messages(update, context); return
     db_user = get_user_from_db(user_id)
     if db_user and db_user.get('is_verified'):
@@ -208,33 +206,15 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if contact and contact.user_id == update.effective_user.id:
         phone_number = contact.phone_number
         if any(phone_number.lstrip('+').startswith(code) for code in ALLOWED_COUNTRY_CODES):
-            join_button = [[KeyboardButton("✅ لقد انضممت الآن")]]; 
-            await update.message.reply_text(JOIN_PROMPT_MESSAGE, reply_markup=ReplyKeyboardMarkup(join_button, resize_keyboard=True, one_time_keyboard=True))
+            keyboard = [
+                [InlineKeyboardButton("1. الانضمام للقناة", url="https://t.me/Ry_Hub")],
+                [InlineKeyboardButton("2. الانضمام للمجموعة", url="https://t.me/+Rrx4fWReNLxlYWNk")],
+                [InlineKeyboardButton("✅ لقد انضممت الآن", callback_data="confirm_join")]
+            ]
+            await update.message.reply_text(JOIN_PROMPT_MESSAGE, reply_markup=InlineKeyboardMarkup(keyboard))
+            await update.message.reply_text("تم استلام الرقم.", reply_markup=ReplyKeyboardRemove())
         else:
             await update.message.reply_text(INVALID_COUNTRY_CODE_MESSAGE, reply_markup=ReplyKeyboardRemove()); return
-
-async def handle_final_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_chat.type != 'private': return
-    user = update.effective_user
-    if await is_user_in_channel_and_group(user.id, context):
-        db_user = get_user_from_db(user.id)
-        if not db_user or not db_user.get('is_verified'):
-            update_user_in_db(user.id, {'is_verified': True, 'full_name': user.full_name})
-            if 'referrer_id' in context.user_data:
-                referrer_id = context.user_data['referrer_id']
-                referrer_db = get_user_from_db(referrer_id)
-                if referrer_db:
-                    new_real = referrer_db.get('real_referrals', 0) + 1
-                    new_fake = max(0, referrer_db.get('fake_referrals', 0) - 1)
-                    update_user_in_db(referrer_id, {'real_referrals': new_real, 'fake_referrals': new_fake})
-                    add_referral_mapping(user.id, referrer_id)
-                    try:
-                        await context.bot.send_message(chat_id=referrer_id, text=f"🎉 تهانينا! لقد انضم مستخدم جديد عن طريق رابطك.\n\nرصيدك الجديد هو: **{new_real}** إحالة حقيقية.", parse_mode='Markdown')
-                    except Exception as e: print(f"Could not send notification to referrer {referrer_id}: {e}")
-        await update.message.reply_text(JOIN_SUCCESS_MESSAGE, reply_markup=ReplyKeyboardRemove())
-        await update.message.reply_text(VERIFIED_WELCOME_MESSAGE, reply_markup=get_main_menu_keyboard(user.id))
-    else:
-        await update.message.reply_text(JOIN_FAIL_MESSAGE)
 
 async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     result = ChatMemberUpdated.extract_status_change(update.chat_member)
@@ -254,14 +234,14 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
 async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id not in BOT_OWNER_IDS or update.effective_chat.type != 'private': return
     state = context.user_data.get('state')
+    
     if state == 'awaiting_winner_threshold':
         try:
             threshold = int(update.message.text)
             del context.user_data['state']
             eligible_users = [u for u in get_all_users_sorted_by() if u.get("real_referrals", 0) >= threshold]
             if not eligible_users:
-                await update.message.reply_text(f"لا يوجد أي متسابقين لديهم {threshold} إحالة حقيقية أو أكثر.")
-                return
+                await update.message.reply_text(f"لا يوجد أي متسابقين لديهم {threshold} إحالة حقيقية أو أكثر."); return
             winner_info = random.choice(eligible_users)
             winner_name = winner_info.get('full_name', f"User_{winner_info.get('user_id')}")
             winner_refs = winner_info.get('real_referrals', 0)
@@ -269,6 +249,27 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text(announcement, parse_mode="Markdown")
         except (ValueError): await update.message.reply_text("الرجاء إرسال رقم صحيح فقط.")
         except Exception as e: await update.message.reply_text(f"حدث خطأ: {e}"); context.user_data.pop('state', None)
+
+    elif state == 'awaiting_broadcast_message':
+        del context.user_data['state']
+        all_users = get_all_users_sorted_by()
+        verified_users = [u for u in all_users if u.get('is_verified')]
+        if not verified_users:
+            await update.message.reply_text("لا يوجد مستخدمين موثقين لإرسال الرسالة إليهم."); return
+        
+        await update.message.reply_text(f"⏳ جاري بدء إرسال الرسالة إلى {len(verified_users)} مستخدم. قد تستغرق هذه العملية بعض الوقت...")
+        success_count, fail_count = 0, 0
+        
+        for user_data in verified_users:
+            user_id = user_data.get('user_id')
+            try:
+                await context.bot.forward_message(chat_id=user_id, from_chat_id=update.message.chat_id, message_id=update.message.message_id)
+                success_count += 1
+                await asyncio.sleep(0.1) # To avoid hitting rate limits
+            except Exception as e:
+                fail_count += 1; print(f"Failed to send broadcast to {user_id}: {e}")
+        
+        await update.message.reply_text(f"✅ اكتملت الإذاعة.\n\n- تم الإرسال بنجاح إلى: {success_count} مستخدم.\n- فشل الإرسال إلى: {fail_count} مستخدم (غالباً قاموا بحظر البوت).")
 
 # --- Command and Button Handlers ---
 async def invites_command(update, context):
@@ -293,10 +294,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text(get_referral_link_text(user_id, context.bot.username), parse_mode="Markdown", reply_markup=get_main_menu_keyboard(user_id))
     elif query.data == "top_5":
         await query.edit_message_text(get_top_5_text(user_id), parse_mode="Markdown", reply_markup=get_main_menu_keyboard(user_id))
+    elif query.data == "confirm_join":
+        if await is_user_in_channel_and_group(user.id, context):
+            db_user = get_user_from_db(user.id)
+            if not db_user or not db_user.get('is_verified'):
+                update_user_in_db(user.id, {'is_verified': True, 'full_name': user.full_name})
+                if 'referrer_id' in context.user_data:
+                    referrer_id = context.user_data['referrer_id']
+                    referrer_db = get_user_from_db(referrer_id)
+                    if referrer_db:
+                        new_real = referrer_db.get('real_referrals', 0) + 1
+                        new_fake = max(0, referrer_db.get('fake_referrals', 0) - 1)
+                        update_user_in_db(referrer_id, {'real_referrals': new_real, 'fake_referrals': new_fake})
+                        add_referral_mapping(user.id, referrer_id)
+                        try:
+                            await context.bot.send_message(chat_id=referrer_id, text=f"🎉 تهانينا! لقد انضم مستخدم جديد عن طريق رابطك.\n\nرصيدك الجديد هو: **{new_real}** إحالة حقيقية.", parse_mode='Markdown')
+                        except Exception as e: print(f"Could not send notification to referrer {referrer_id}: {e}")
+            await query.message.edit_text(JOIN_SUCCESS_MESSAGE)
+            await query.message.reply_text(VERIFIED_WELCOME_MESSAGE, reply_markup=get_main_menu_keyboard(user.id))
+        else:
+            await query.answer(text=JOIN_FAIL_MESSAGE, show_alert=True)
+            
+    # Admin Panel Logic
     elif query.data == "admin_panel" and is_owner:
         await query.edit_message_text(text="👑 أهلاً بك في لوحة تحكم المالك.", reply_markup=get_admin_panel_keyboard())
     elif query.data == "pick_winner" and is_owner:
         context.user_data['state'] = 'awaiting_winner_threshold'; await query.edit_message_text(text="الرجاء إرسال الحد الأدنى لعدد الإحالات الحقيقية لدخول السحب (مثال: أرسل الرقم 5).")
+    elif query.data == "admin_broadcast" and is_owner:
+        context.user_data['state'] = 'awaiting_broadcast_message'
+        await query.edit_message_text(text="الآن، أرسل الرسالة التي تريد إذاعتها لجميع المستخدمين الموثقين.")
     elif query.data == "admin_reset_all" and is_owner:
         await query.edit_message_text(text="⚠️ **تأكيد الإجراء** ⚠️\n\nهل أنت متأكد؟ هذا الإجراء لا يمكن التراجع عنه.", parse_mode="Markdown", reply_markup=get_reset_confirmation_keyboard())
     elif query.data == "admin_reset_confirm" and is_owner:
@@ -321,16 +347,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(ChatMemberHandler(handle_chat_member_updates, ChatMemberHandler.CHAT_MEMBER))
+    # State handlers must have priority (lower group number)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_messages), group=0)
-    application.add_handler(CommandHandler("start", start), group=1)
-    application.add_handler(CommandHandler("Invites", invites_command), group=1)
-    application.add_handler(CommandHandler("link", link_command), group=1)
-    application.add_handler(CommandHandler("Top", top_command), group=1)
-    application.add_handler(CallbackQueryHandler(button_handler), group=1)
-    application.add_handler(MessageHandler(filters.CONTACT, handle_contact), group=1)
-    application.add_handler(MessageHandler(filters.Regex("^✅ لقد انضممت الآن$"), handle_final_join_check), group=1)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_verification_text), group=1)
-    print("Bot is running...")
+    # Command and other handlers
+    application.add_handler(CommandHandler("start", start), group=2)
+    application.add_handler(CommandHandler("Invites", invites_command), group=2)
+    application.add_handler(CommandHandler("link", link_command), group=2)
+    application.add_handler(CommandHandler("Top", top_command), group=2)
+    application.add_handler(CallbackQueryHandler(button_handler), group=2)
+    application.add_handler(MessageHandler(filters.CONTACT, handle_contact), group=2)
+    print("Bot is running with Supabase integration and all features...")
     application.run_polling()
 
 if __name__ == "__main__":
