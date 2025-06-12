@@ -261,9 +261,16 @@ def get_referral_link_text(user_id: int, bot_username: str) -> str:
     return f"🔗 رابط الإحالة الخاص بك:\n`https://t.me/{bot_username}?start={user_id}`"
 
 async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Generates the text for the top 5 leaderboard and the user's personal rank."""
-    all_users = await get_users_with_cache(context)
+    """Generates the text for the top 5 leaderboard and the user's personal rank.
     
+    MODIFIED: This function now ALWAYS fetches fresh data from the database, bypassing the cache.
+    """
+    logger.info("Fetching fresh DB data for /top command.")
+    all_users = await get_all_users_from_db()
+    
+    if not all_users:
+        return "🏆 **أفضل 5 متسابقين لدينا:**\n\nلم يصل أحد إلى القائمة بعد. كن أنت الأول!\n\n---\n**ترتيبك الشخصي:**\nلا يمكن عرض ترتيبك حالياً."
+
     # Sort all users by real referrals to create a unified ranking list
     full_sorted_list = sorted(all_users, key=lambda u: u.get('real_referrals', 0), reverse=True)
     
@@ -287,7 +294,6 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
             rank_str = f"#{user_index + 1}"
             my_referrals = full_sorted_list[user_index].get("real_referrals", 0)
         else:
-            # Fallback if user is not in cache (should be rare)
             db_user = await get_user_from_db(user_id)
             my_referrals = db_user.get("real_referrals", 0) if db_user else 0
             rank_str = "غير مصنف" if my_referrals == 0 else "N/A"
@@ -566,12 +572,10 @@ async def reconcile_single_user(user_id: int, context: ContextTypes.DEFAULT_TYPE
     user_data = await get_user_from_db(user_id)
     if not user_data: return 0
     
-    # This is inefficient as it fetches all mappings. A direct DB query would be better.
-    # SELECT count(*) FROM referrals WHERE referrer_user_id = X AND referred_user_id IN (SELECT user_id FROM users WHERE is_verified = true)
     all_mappings = await get_all_referral_mappings()
     user_referral_links = [m for m in all_mappings if m.get('referrer_user_id') == user_id]
     
-    all_users = await get_users_with_cache(context, force_refresh=True)
+    all_users = await get_all_users_from_db()
     verified_ids = {u['user_id'] for u in all_users if u.get('is_verified')}
     
     calculated_real = sum(1 for link in user_referral_links if link['referred_user_id'] in verified_ids)
@@ -595,7 +599,6 @@ async def reconcile_all_referrals_job(context: ContextTypes.DEFAULT_TYPE) -> Non
     owner_id = context.job.chat_id
     await context.bot.send_message(owner_id, "⏳ **بدء الفحص الشامل المحسّن...**\nهذه العملية تعيد بناء كل الإحصائيات.", parse_mode=ParseMode.MARKDOWN)
     
-    # Fetch all necessary data from DB
     all_users = await get_all_users_from_db()
     all_mappings = await get_all_referral_mappings()
 
@@ -604,10 +607,8 @@ async def reconcile_all_referrals_job(context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     verified_ids = {u['user_id'] for u in all_users if u.get('is_verified')}
-    # Initialize calculated counts for all users in memory
     calculated_counts = {u['user_id']: {'real': 0, 'fake': 0} for u in all_users}
 
-    # Calculate correct counts in memory without any DB calls in the loop
     for mapping in all_mappings:
         referrer_id = mapping.get('referrer_user_id')
         referred_id = mapping.get('referred_user_id')
@@ -617,7 +618,6 @@ async def reconcile_all_referrals_job(context: ContextTypes.DEFAULT_TYPE) -> Non
             else:
                 calculated_counts[referrer_id]['fake'] += 1
 
-    # Compare calculated counts with stored counts and prepare a batch update
     users_to_update = []
     for user in all_users:
         user_id = user['user_id']
@@ -632,7 +632,7 @@ async def reconcile_all_referrals_job(context: ContextTypes.DEFAULT_TYPE) -> Non
     if users_to_update:
         await upsert_users_batch(users_to_update)
         
-    await get_users_with_cache(context, force_refresh=True) # Refresh cache
+    await get_users_with_cache(context, force_refresh=True)
     await context.bot.send_message(owner_id, f"✅ **اكتمل الفحص الشامل.**\nتم تصحيح بيانات **{len(users_to_update)}** مستخدم.", parse_mode=ParseMode.MARKDOWN)
 
 async def recheck_leavers_and_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -649,23 +649,18 @@ async def recheck_leavers_and_notify_job(context: ContextTypes.DEFAULT_TYPE) -> 
         await context.bot.send_message(owner_id, "✅ لا توجد إحالات مسجلة لفحصها.")
         return
 
-    # Create a set of users who are currently verified members
     verified_member_ids = {u['user_id'] for u in all_users if u.get('is_verified')}
     
-    # Calculate correct stats for ALL users in memory (similar to reconcile_all)
-    # This is more efficient than checking each leaver one by one.
     calculated_counts = {u['user_id']: {'real': 0, 'fake': 0} for u in all_users}
     for mapping in all_mappings:
         referrer_id = mapping.get('referrer_user_id')
         referred_id = mapping.get('referred_user_id')
         if referrer_id in calculated_counts:
-            # A user is a 'real' referral only if they are in the verified member set
             if referred_id in verified_member_ids:
                 calculated_counts[referrer_id]['real'] += 1
             else:
                 calculated_counts[referrer_id]['fake'] += 1
 
-    # Compare and find which users need updating
     users_to_update = []
     for user in all_users:
         user_id = user['user_id']
@@ -707,20 +702,6 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
             # --- ATOMIC REFERRAL UPDATE ---
             if 'referrer_id' in context.user_data:
                 referrer_id = context.user_data.pop('referrer_id')
-                
-                # IMPORTANT: This RPC call is the key to preventing race conditions.
-                # You must create this function in your Supabase SQL editor.
-                #
-                # CREATE OR REPLACE FUNCTION handle_new_referral(p_referrer_id BIGINT)
-                # RETURNS VOID AS $$
-                # BEGIN
-                #     UPDATE users
-                #     SET
-                #         real_referrals = real_referrals + 1,
-                #         fake_referrals = GREATEST(0, fake_referrals - 1)
-                #     WHERE user_id = p_referrer_id;
-                # END;
-                # $$ LANGUAGE plpgsql;
                 try:
                     await run_sync_db(lambda: supabase.rpc('handle_new_referral', {'p_referrer_id': referrer_id}).execute())
                     await add_referral_mapping(user.id, referrer_id)
@@ -764,7 +745,13 @@ async def handle_my_link(query: CallbackQuery, context: ContextTypes.DEFAULT_TYP
 async def handle_top_5(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(Messages.LOADING)
     text = await get_top_5_text(query.from_user.id, context)
-    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu_keyboard(query.from_user.id))
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu_keyboard(query.from_user.id))
+    except TelegramError as e:
+        if "message is not modified" in str(e).lower():
+            logger.warning("Message not modified for top_5, ignoring.")
+        else:
+            raise e
 
 # --- Admin Callback Handlers ---
 async def handle_admin_panel(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -830,8 +817,11 @@ async def handle_user_edit_action(query: CallbackQuery, context: ContextTypes.DE
     await query.edit_message_text(text="الرجاء إرسال الـ ID الرقمي للمستخدم لتنفيذ الإجراء.")
 
 async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles pagination for reports.
+    MODIFIED: This function now ALWAYS fetches fresh data from the database, bypassing the cache.
+    """
     try:
-        # Robust parsing of callback data
         data_parts = query.data.split('_')
         if not (len(data_parts) == 4 and data_parts[0] == 'report' and data_parts[2] == 'page'):
             raise ValueError("Invalid callback format")
@@ -839,7 +829,8 @@ async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.D
         report_type = data_parts[1]
         page = int(data_parts[3])
         
-        all_users = await get_users_with_cache(context)
+        logger.info(f"Fetching fresh DB data for paginated report (type: {report_type}, page: {page}).")
+        all_users = await get_all_users_from_db()
         
         sort_key, filter_positive = "", False
         if report_type == 'real':
@@ -848,7 +839,7 @@ async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.D
             sort_key = 'fake_referrals'
             filter_positive = True
         else:
-            return # Should not happen
+            return
 
         filtered_users = all_users
         if filter_positive:
@@ -858,6 +849,11 @@ async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.D
 
         text, keyboard = get_paginated_report(filtered_users, page, report_type)
         await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+    except TelegramError as e:
+        if "message is not modified" in str(e).lower():
+             logger.warning(f"Message not modified for report pagination, ignoring. Callback: {query.data}")
+        else:
+            raise e
     except (ValueError, IndexError) as e:
         logger.warning(f"Invalid report pagination callback data: {query.data} ({e})")
         await query.answer("خطأ في البيانات.", show_alert=True)
@@ -995,7 +991,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
     elif state == State.AWAITING_WINNER_THRESHOLD:
         try:
             threshold = int(text)
-            all_users = await get_users_with_cache(context, force_refresh=True)
+            all_users = await get_all_users_from_db() # Fetch fresh data for accuracy
             eligible = [u for u in all_users if u.get('real_referrals', 0) >= threshold and u.get('is_verified')]
             
             if not eligible:
@@ -1017,7 +1013,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
     elif state == State.AWAITING_BROADCAST_MESSAGE:
         await update.message.reply_text("⏳ جاري بدء الإذاعة... ستصلك رسالة عند الانتهاء.")
         
-        all_users = await get_users_with_cache(context)
+        all_users = await get_all_users_from_db()
         verified_users_ids = [u['user_id'] for u in all_users if u.get('is_verified')]
         sent, failed = 0, 0
         
