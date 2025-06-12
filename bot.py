@@ -65,6 +65,7 @@ class Config:
     BOT_TOKEN = "7950170561:AAECeQpxb1G4zrnFhrol_uBgPNoxZN-Qkz0"
     SUPABASE_URL = "https://jofxsqsgarvzolgphqjg.supabase.co"
     SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
+
     # --- Channel and Group Information ---
     CHANNEL_ID = -1002686156311  # Your public/private channel ID
     GROUP_ID = -1002472491601    # Your group ID
@@ -413,8 +414,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     user_id = user.id
     
-    # Ensure the user exists in our database
-    await upsert_user_in_db({'user_id': user_id, 'full_name': user.full_name, 'username': user.username})
+    # Ensure the user exists in our database.
+    # If the user has no username, provide a default one to avoid database errors.
+    user_data = {
+        'user_id': user_id,
+        'full_name': user.full_name,
+        'username': user.username or f"user_{user_id}"
+    }
+    await upsert_user_in_db(user_data)
     
     db_user = await get_user_from_db(user_id)
     
@@ -689,7 +696,13 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
         # Ensure we only process this once
         if not db_user or not db_user.get('is_verified'):
             # Mark user as verified
-            await upsert_user_in_db({'user_id': user.id, 'is_verified': True, 'full_name': user.full_name, 'username': user.username})
+            user_data = {
+                'user_id': user.id,
+                'is_verified': True,
+                'full_name': user.full_name,
+                'username': user.username or f"user_{user.id}"
+            }
+            await upsert_user_in_db(user_data)
             
             # --- ATOMIC REFERRAL UPDATE ---
             if 'referrer_id' in context.user_data:
