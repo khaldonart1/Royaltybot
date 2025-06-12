@@ -11,7 +11,7 @@ Features:
     - Viewing paginated reports of real and fake referrals.
     - Broadcasting messages to all verified users.
     - Picking a random winner from users who meet a certain referral threshold.
-    - Manually editing a user's referral counts.
+    - Manually editing a شuser's referral counts.
     - Resetting all referral statistics for a new competition.
 - Automated data reconciliation jobs to ensure data integrity.
 - Real-time updates when a user leaves the channel/group, automatically adjusting the referrer's score.
@@ -42,7 +42,7 @@ from typing import Dict, Any, Tuple, Optional, List, Set, Callable, Awaitable
 from supabase import create_client, Client, APIResponse
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
-    ReplyKeyboardMarkup, ReplyKeyboardRemove, ChatMemberUpdated, Chat
+    ReplyKeyboardMarkup, ReplyKeyboardRemove, ChatMemberUpdated, Chat, CallbackQuery
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes,
@@ -525,6 +525,14 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     phone_number = contact.phone_number.lstrip('+')
     if any(phone_number.startswith(code) for code in Config.ALLOWED_COUNTRY_CODES):
+        
+        # Step 1: Send a simple message to remove the old reply keyboard.
+        await update.message.reply_text(
+            "تم استلام الرقم بنجاح.", 
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+        # Step 2: Send the new prompt with the new inline keyboard.
         keyboard = [
             [InlineKeyboardButton("1. الانضمام للقناة", url=Config.CHANNEL_URL)],
             [InlineKeyboardButton("2. الانضمام للمجموعة", url=Config.GROUP_URL)],
@@ -532,14 +540,14 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ]
         await update.message.reply_text(
             Messages.JOIN_PROMPT, 
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            # Remove the "Share Contact" keyboard
-            reply_markup=ReplyKeyboardRemove()
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
     else:
+        # If the country code is invalid, just remove the keyboard.
         await update.message.reply_text(Messages.INVALID_COUNTRY_CODE, reply_markup=ReplyKeyboardRemove())
-        # Restart verification if country code is wrong
+        # Restart verification
         await ask_math_question(update, context)
+
 
 # --- Background Jobs & Reconciliation ---
 async def reconcile_single_user(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -672,7 +680,7 @@ async def recheck_leavers_and_notify_job(context: ContextTypes.DEFAULT_TYPE) -> 
     await context.bot.send_message(owner_id, f"✅ اكتمل فحص المغادرين. تم إعادة فحص وتصحيح بيانات **{len(users_to_update)}** من أصحاب الدعوات.", parse_mode=ParseMode.MARKDOWN)
 
 # --- Callback Query (Button) Handlers ---
-async def handle_confirm_join(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the final verification step after a user confirms they have joined."""
     user = query.from_user
     await query.edit_message_text("⏳ جاري التحقق من انضمامك...")
@@ -731,54 +739,54 @@ async def handle_confirm_join(query: CallbackQueryHandler, context: ContextTypes
         ]
         await query.edit_message_text(Messages.JOIN_PROMPT, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def handle_main_menu(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_main_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(text=Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(query.from_user.id))
 
-async def handle_my_referrals(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_my_referrals(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_info = await get_user_from_db(query.from_user.id)
     await query.edit_message_text(get_referral_stats_text(user_info), parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu_keyboard(query.from_user.id))
 
-async def handle_my_link(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_my_link(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(get_referral_link_text(query.from_user.id, context.bot.username), parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu_keyboard(query.from_user.id))
 
-async def handle_top_5(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_top_5(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(Messages.LOADING)
     text = await get_top_5_text(query.from_user.id, context)
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu_keyboard(query.from_user.id))
 
 # --- Admin Callback Handlers ---
-async def handle_admin_panel(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_admin_panel(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(text=Messages.ADMIN_WELCOME, reply_markup=get_admin_panel_keyboard())
 
-async def handle_admin_user_count(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_admin_user_count(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     all_users = await get_users_with_cache(context, force_refresh=True)
     total = len(all_users)
     verified = sum(1 for u in all_users if u.get('is_verified'))
     text = f"📈 **إحصائيات مستخدمي البوت:**\n\n▫️ إجمالي المستخدمين: **{total}**\n✅ المستخدمون الموثقون: **{verified}**"
     await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
 
-async def handle_pick_winner(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_pick_winner(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['state'] = State.AWAITING_WINNER_THRESHOLD
     await query.edit_message_text(text="الرجاء إرسال الحد الأدنى لعدد الإحالات الحقيقية لدخول السحب (مثال: أرسل الرقم 5).")
 
-async def handle_admin_broadcast(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_admin_broadcast(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['state'] = State.AWAITING_BROADCAST_MESSAGE
     await query.edit_message_text(text="الآن، أرسل الرسالة التي تريد إذاعتها لجميع المستخدمين الموثقين. يمكنك استخدام تنسيق Markdown.")
 
-async def handle_admin_reset_all(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_admin_reset_all(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(
         text="⚠️ **تأكيد الإجراء** ⚠️\n\nهل أنت متأكد من أنك تريد تصفير **جميع** الإحالات؟ هذا الإجراء لا يمكن التراجع عنه.", 
         parse_mode=ParseMode.MARKDOWN, 
         reply_markup=get_reset_confirmation_keyboard()
     )
 
-async def handle_admin_reset_confirm(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_admin_reset_confirm(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(text="⏳ جاري تصفير جميع الإحالات...")
     await reset_all_referrals_in_db()
     await get_users_with_cache(context, force_refresh=True)
     await query.edit_message_text(text="✅ تم تصفير جميع إحصائيات الإحالات بنجاح.", reply_markup=get_admin_panel_keyboard())
 
-async def handle_admin_checker(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_admin_checker(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "🔫 **المدقق**\n\n"
         "- **فحص شامل للكل**: يقوم بمراجعة **كل** الإحالات المسجلة وتصحيح الأرقام. **العملية محسّنة وتستخدم استدعاءً واحدًا لقاعدة البيانات للتحديث**.\n"
@@ -786,30 +794,30 @@ async def handle_admin_checker(query: CallbackQueryHandler, context: ContextType
     )
     await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_checker_keyboard())
 
-async def handle_admin_check_all(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_admin_check_all(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.job_queue.run_once(reconcile_all_referrals_job, 1, chat_id=query.from_user.id, name=f"reconcile_all_{query.from_user.id}")
     await query.edit_message_text(text="تم جدولة الفحص الشامل. ستبدأ العملية في الخلفية وستصلك رسالة عند الانتهاء.", reply_markup=get_admin_panel_keyboard())
 
-async def handle_admin_check_one(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_admin_check_one(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['state'] = State.AWAITING_CHECK_USER_ID
     await query.edit_message_text(text="الرجاء إرسال الـ ID الرقمي للمستخدم الذي تريد فحص إحالاته.")
 
-async def handle_booo_menu(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_booo_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(text="👾 **Booo**\n\nاختر الأداة التي تريد استخدامها:", reply_markup=get_booo_menu_keyboard())
 
-async def handle_recheck_leavers(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_recheck_leavers(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.job_queue.run_once(recheck_leavers_and_notify_job, 1, chat_id=query.from_user.id, name=f"recheck_leavers_{query.from_user.id}")
     await query.edit_message_text(text="تم جدولة فحص المغادرين. ستبدأ العملية المحسّنة في الخلفية وستصلك رسالة عند الانتهاء.", reply_markup=get_admin_panel_keyboard())
 
-async def handle_user_edit_menu(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_user_edit_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(text="👤 **تعديل المستخدم**\n\nاختر الإجراء المطلوب:", reply_markup=get_user_edit_keyboard())
 
-async def handle_user_edit_action(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_user_edit_action(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['state'] = State.AWAITING_EDIT_USER_ID
     context.user_data['action_type'] = query.data
     await query.edit_message_text(text="الرجاء إرسال الـ ID الرقمي للمستخدم لتنفيذ الإجراء.")
 
-async def handle_report_pagination(query: CallbackQueryHandler, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         # Robust parsing of callback data
         data_parts = query.data.split('_')
@@ -846,7 +854,7 @@ async def handle_report_pagination(query: CallbackQueryHandler, context: Context
         await query.edit_message_text("حدث خطأ أثناء إنشاء التقرير.", reply_markup=get_admin_panel_keyboard())
 
 # --- Callback Dispatcher ---
-CALLBACK_DISPATCHER: Dict[str, Callable[[CallbackQueryHandler, ContextTypes.DEFAULT_TYPE], Awaitable[None]]] = {
+CALLBACK_DISPATCHER: Dict[str, Callable[[CallbackQuery, ContextTypes.DEFAULT_TYPE], Awaitable[None]]] = {
     Callback.MAIN_MENU.value: handle_main_menu,
     Callback.MY_REFERRALS.value: handle_my_referrals,
     Callback.MY_LINK.value: handle_my_link,
