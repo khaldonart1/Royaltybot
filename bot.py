@@ -11,7 +11,7 @@ Features:
     - Viewing paginated reports of real and fake referrals.
     - Broadcasting messages to all verified users.
     - Picking a random winner from users who meet a certain referral threshold.
-    - Manually editing a شuser's referral counts.
+    - Manually editing a user's referral counts.
     - Resetting all referral statistics for a new competition.
 - Automated data reconciliation jobs to ensure data integrity.
 - Real-time updates when a user leaves the channel/group, automatically adjusting the referrer's score.
@@ -39,7 +39,7 @@ from typing import Dict, Any, Tuple, Optional, List, Set, Callable, Awaitable
 
 # --- Third-Party Libraries ---
 # Ensure you have these installed: pip install python-telegram-bot supabase
-from supabase import create_client, Client, APIResponse
+from supabase import create_client, Client
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
     ReplyKeyboardMarkup, ReplyKeyboardRemove, ChatMemberUpdated, Chat, CallbackQuery
@@ -65,7 +65,6 @@ class Config:
     BOT_TOKEN = "7950170561:AAECeQpxb1G4zrnFhrol_uBgPNoxZN-Qkz0"
     SUPABASE_URL = "https://jofxsqsgarvzolgphqjg.supabase.co"
     SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
-
     # --- Channel and Group Information ---
     CHANNEL_ID = -1002686156311  # Your public/private channel ID
     GROUP_ID = -1002472491601    # Your group ID
@@ -146,7 +145,7 @@ async def run_sync_db(func: Callable[[], Any]) -> Any:
 async def get_user_from_db(user_id: int) -> Optional[Dict[str, Any]]:
     """Fetches a single user's data from the database."""
     try:
-        res: APIResponse = await run_sync_db(
+        res = await run_sync_db(
             lambda: supabase.table('users').select("*").eq('user_id', user_id).single().execute()
         )
         return res.data
@@ -172,7 +171,7 @@ async def upsert_users_batch(users_data: List[Dict[str, Any]]) -> None:
 async def get_all_users_from_db() -> List[Dict[str, Any]]:
     """Retrieves a list of all users with essential fields."""
     try:
-        res: APIResponse = await run_sync_db(
+        res = await run_sync_db(
             lambda: supabase.table('users').select(
                 "user_id, full_name, username, real_referrals, fake_referrals, is_verified"
             ).execute()
@@ -185,7 +184,7 @@ async def get_all_users_from_db() -> List[Dict[str, Any]]:
 async def get_referrer(referred_id: int) -> Optional[int]:
     """Finds who referred a given user."""
     try:
-        res: APIResponse = await run_sync_db(
+        res = await run_sync_db(
             lambda: supabase.table('referrals').select('referrer_user_id').eq('referred_user_id', referred_id).single().execute()
         )
         return res.data.get('referrer_user_id') if res.data else None
@@ -195,7 +194,7 @@ async def get_referrer(referred_id: int) -> Optional[int]:
 async def get_all_referral_mappings() -> List[Dict[str, Any]]:
     """Fetches the entire referrals table mapping referred users to their referrers."""
     try:
-        res: APIResponse = await run_sync_db(
+        res = await run_sync_db(
             lambda: supabase.table('referrals').select("referrer_user_id, referred_user_id").execute()
         )
         return res.data or []
