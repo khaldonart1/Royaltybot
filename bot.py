@@ -146,8 +146,9 @@ async def run_sync_db(func: Callable[[], Any]) -> Any:
 async def get_user_from_db(user_id: int) -> Optional[Dict[str, Any]]:
     """Fetches a single user's data from the database."""
     try:
+        # ROBUSTNESS FIX: Removed 'username' from select statement.
         res = await run_sync_db(
-            lambda: supabase.table('users').select("*").eq('user_id', user_id).single().execute()
+            lambda: supabase.table('users').select("user_id, full_name, real_referrals, fake_referrals, is_verified").eq('user_id', user_id).single().execute()
         )
         return res.data
     except Exception as e:
@@ -172,9 +173,10 @@ async def upsert_users_batch(users_data: List[Dict[str, Any]]) -> None:
 async def get_all_users_from_db() -> List[Dict[str, Any]]:
     """Retrieves a list of all users with essential fields."""
     try:
+        # ROBUSTNESS FIX: Removed 'username' from the select query to prevent schema errors.
         res = await run_sync_db(
             lambda: supabase.table('users').select(
-                "user_id, full_name, username, real_referrals, fake_referrals, is_verified"
+                "user_id, full_name, real_referrals, fake_referrals, is_verified"
             ).execute()
         )
         return res.data or []
@@ -240,18 +242,19 @@ async def get_users_with_cache(context: ContextTypes.DEFAULT_TYPE, force_refresh
     logger.info("User cache is stale or needs refresh. Fetching from database.")
     users_data = await get_all_users_from_db()
 
-    if users_data:
+    # Only update cache if the fetch from DB was successful (returned a list)
+    if isinstance(users_data, list):
         context.bot_data['user_cache'] = {'data': users_data, 'timestamp': current_time}
-    elif cache:
-        logger.warning("Failed to fetch fresh user data from DB. Using stale cache.")
-        return cache.get('data', [])
-
-    return users_data
+        return users_data
+    
+    # If fetch failed, return stale data from cache if it exists
+    logger.warning("Failed to fetch fresh user data from DB. Using stale cache if available.")
+    return cache.get('data', [])
 
 # --- Message and Keyboard Generators ---
 def get_referral_stats_text(user_info: Optional[Dict[str, Any]]) -> str:
     """Formats the text for the user's personal referral statistics."""
-    if not user_info: return "لا توجد لديك بيانات بعد."
+    if not user_info: return "لا توجد لديك بيانات بعد. حاول مرة أخرى."
     real = user_info.get("real_referrals", 0)
     fake = user_info.get("fake_referrals", 0)
     return f"📊 **إحصائيات إحالاتك:**\n\n✅ الإحالات الحقيقية: **{real}**\n⏳ الإحالات الوهمية: **{fake}**"
@@ -261,20 +264,15 @@ def get_referral_link_text(user_id: int, bot_username: str) -> str:
     return f"🔗 رابط الإحالة الخاص بك:\n`https://t.me/{bot_username}?start={user_id}`"
 
 async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Generates the text for the top 5 leaderboard and the user's personal rank.
-    
-    MODIFIED: This function now ALWAYS fetches fresh data from the database, bypassing the cache.
-    """
-    logger.info("Fetching fresh DB data for /top command.")
-    all_users = await get_all_users_from_db()
+    """Generates the text for the top 5 leaderboard and the user's personal rank."""
+    logger.info("Forcing cache refresh for /top command to ensure data accuracy.")
+    all_users = await get_users_with_cache(context, force_refresh=True)
     
     if not all_users:
         return "🏆 **أفضل 5 متسابقين لدينا:**\n\nلم يصل أحد إلى القائمة بعد. كن أنت الأول!\n\n---\n**ترتيبك الشخصي:**\nلا يمكن عرض ترتيبك حالياً."
 
-    # Sort all users by real referrals to create a unified ranking list
     full_sorted_list = sorted(all_users, key=lambda u: u.get('real_referrals', 0), reverse=True)
     
-    # Generate Top 5 text
     text = "🏆 **أفضل 5 متسابقين لدينا:**\n\n"
     top_5_users = [u for u in full_sorted_list if u.get("real_referrals", 0) > 0][:5]
     if not top_5_users:
@@ -285,7 +283,6 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
             count = u_info.get("real_referrals", 0)
             text += f"{i+1}. {full_name} - **{count}** إحالة\n"
     
-    # Find user's rank
     text += "\n---\n**ترتيبك الشخصي:**\n"
     try:
         user_index = next((i for i, u in enumerate(full_sorted_list) if u.get('user_id') == user_id), -1)
@@ -293,10 +290,9 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
         if user_index != -1:
             rank_str = f"#{user_index + 1}"
             my_referrals = full_sorted_list[user_index].get("real_referrals", 0)
-        else:
-            db_user = await get_user_from_db(user_id)
-            my_referrals = db_user.get("real_referrals", 0) if db_user else 0
-            rank_str = "غير مصنف" if my_referrals == 0 else "N/A"
+        else: # Should be rare if user data is fetched correctly
+            my_referrals = 0
+            rank_str = "غير مصنف"
         
         text += f"🎖️ ترتيبك: **{rank_str}**\n✅ رصيدك: **{my_referrals}** إحالة حقيقية."
     except Exception as e:
@@ -420,12 +416,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     user_id = user.id
     
-    # Ensure the user exists in our database.
-    # If the user has no username, provide a default one to avoid database errors.
+    # ROBUSTNESS FIX: Do not include username in the database payload.
     user_data = {
         'user_id': user_id,
         'full_name': user.full_name,
-        'username': user.username or f"user_{user_id}"
     }
     await upsert_user_in_db(user_data)
     
@@ -440,12 +434,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if args:
         try:
             referrer_id = int(args[0])
-            # A user cannot refer themselves and can only be referred once.
             if referrer_id != user_id and not await get_referrer(user_id):
-                # Temporarily store referrer_id until verification is complete
                 context.user_data['referrer_id'] = referrer_id
-                
-                # Increment fake referrals immediately. This will be converted to a real referral upon verification.
                 referrer_db = await get_user_from_db(referrer_id)
                 if referrer_db:
                     new_fake = referrer_db.get('fake_referrals', 0) + 1
@@ -499,7 +489,6 @@ async def handle_verification_text(update: Update, context: ContextTypes.DEFAULT
     
     user_id = update.effective_user.id
     
-    # Route messages from admins in a stateful conversation to the admin handler
     if user_id in Config.BOT_OWNER_IDS and context.user_data.get('state'):
         await handle_admin_messages(update, context)
         return
@@ -509,7 +498,6 @@ async def handle_verification_text(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(user_id))
         return
 
-    # Check if we are waiting for a math answer
     if 'math_answer' in context.user_data:
         try:
             if int(update.message.text) == context.user_data['math_answer']:
@@ -531,20 +519,17 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     
     contact = update.message.contact
-    # Ensure the contact shared belongs to the user who sent it
     if contact.user_id != update.effective_user.id:
         return
 
     phone_number = contact.phone_number.lstrip('+')
     if any(phone_number.startswith(code) for code in Config.ALLOWED_COUNTRY_CODES):
         
-        # Step 1: Send a simple message to remove the old reply keyboard.
         await update.message.reply_text(
             "تم استلام الرقم بنجاح.", 
             reply_markup=ReplyKeyboardRemove()
         )
 
-        # Step 2: Send the new prompt with the new inline keyboard.
         keyboard = [
             [InlineKeyboardButton("1. الانضمام للقناة", url=Config.CHANNEL_URL)],
             [InlineKeyboardButton("2. الانضمام للمجموعة", url=Config.GROUP_URL)],
@@ -555,9 +540,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     else:
-        # If the country code is invalid, just remove the keyboard.
         await update.message.reply_text(Messages.INVALID_COUNTRY_CODE, reply_markup=ReplyKeyboardRemove())
-        # Restart verification
         await ask_math_question(update, context)
 
 
@@ -576,6 +559,8 @@ async def reconcile_single_user(user_id: int, context: ContextTypes.DEFAULT_TYPE
     user_referral_links = [m for m in all_mappings if m.get('referrer_user_id') == user_id]
     
     all_users = await get_all_users_from_db()
+    if not isinstance(all_users, list): return 0 # Guard against DB error
+
     verified_ids = {u['user_id'] for u in all_users if u.get('is_verified')}
     
     calculated_real = sum(1 for link in user_referral_links if link['referred_user_id'] in verified_ids)
@@ -594,7 +579,6 @@ async def reconcile_single_user(user_id: int, context: ContextTypes.DEFAULT_TYPE
 async def reconcile_all_referrals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     (OPTIMIZED) Rebuilds all referral stats from scratch and updates the database in a single batch operation.
-    This is the most efficient way to correct all user counts.
     """
     owner_id = context.job.chat_id
     await context.bot.send_message(owner_id, "⏳ **بدء الفحص الشامل المحسّن...**\nهذه العملية تعيد بناء كل الإحصائيات.", parse_mode=ParseMode.MARKDOWN)
@@ -688,18 +672,15 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
     
     if await is_user_in_channel_and_group(user.id, context):
         db_user = await get_user_from_db(user.id)
-        # Ensure we only process this once
         if not db_user or not db_user.get('is_verified'):
-            # Mark user as verified
+            # ROBUSTNESS FIX: Do not include username in the database payload.
             user_data = {
                 'user_id': user.id,
                 'is_verified': True,
-                'full_name': user.full_name,
-                'username': user.username or f"user_{user.id}"
+                'full_name': user.full_name
             }
             await upsert_user_in_db(user_data)
             
-            # --- ATOMIC REFERRAL UPDATE ---
             if 'referrer_id' in context.user_data:
                 referrer_id = context.user_data.pop('referrer_id')
                 try:
@@ -707,7 +688,6 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
                     await add_referral_mapping(user.id, referrer_id)
                     await get_users_with_cache(context, force_refresh=True)
                     
-                    # Notify referrer
                     referrer_db = await get_user_from_db(referrer_id)
                     new_real_count = referrer_db.get('real_referrals', 0) if referrer_db else 'N/A'
                     await context.bot.send_message(
@@ -817,10 +797,7 @@ async def handle_user_edit_action(query: CallbackQuery, context: ContextTypes.DE
     await query.edit_message_text(text="الرجاء إرسال الـ ID الرقمي للمستخدم لتنفيذ الإجراء.")
 
 async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles pagination for reports.
-    MODIFIED: This function now ALWAYS fetches fresh data from the database, bypassing the cache.
-    """
+    """Handles pagination for reports."""
     try:
         data_parts = query.data.split('_')
         if not (len(data_parts) == 4 and data_parts[0] == 'report' and data_parts[2] == 'page'):
@@ -829,8 +806,8 @@ async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.D
         report_type = data_parts[1]
         page = int(data_parts[3])
         
-        logger.info(f"Fetching fresh DB data for paginated report (type: {report_type}, page: {page}).")
-        all_users = await get_all_users_from_db()
+        logger.info(f"Forcing cache refresh for paginated report (type: {report_type}, page: {page}).")
+        all_users = await get_users_with_cache(context, force_refresh=True)
         
         sort_key, filter_positive = "", False
         if report_type == 'real':
@@ -893,13 +870,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     await query.answer() # Acknowledge the button press immediately
     
-    # Standard callbacks
     handler = CALLBACK_DISPATCHER.get(query.data)
     if handler:
         await handler(query, context)
         return
         
-    # Pagination callbacks
     if query.data.startswith(Callback.REPORT_PAGE.value):
         await handle_report_pagination(query, context)
         return
@@ -908,12 +883,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # --- Admin Message Handling State Machine ---
 async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles text-based input from admins who are in a specific state (e.g., AWAITING_BROADCAST_MESSAGE)."""
+    """Handles text-based input from admins who are in a specific state."""
     state = context.user_data.get('state')
     text = update.message.text
-    admin_id = update.effective_user.id
-
-    # Clear state after any action to prevent accidental re-triggering
+    
     context.user_data.pop('state', None)
 
     if state == State.AWAITING_EDIT_USER_ID:
@@ -991,7 +964,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
     elif state == State.AWAITING_WINNER_THRESHOLD:
         try:
             threshold = int(text)
-            all_users = await get_all_users_from_db() # Fetch fresh data for accuracy
+            all_users = await get_all_users_from_db()
             eligible = [u for u in all_users if u.get('real_referrals', 0) >= threshold and u.get('is_verified')]
             
             if not eligible:
@@ -1023,7 +996,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 sent += 1
             except TelegramError:
                 failed += 1
-            await asyncio.sleep(0.05) # Rate limit: 20 messages/second
+            await asyncio.sleep(0.05)
             
         await update.message.reply_text(f"✅ اكتملت الإذاعة.\n- تم الإرسال إلى: {sent}\n- فشل الإرسال إلى: {failed}", reply_markup=get_admin_panel_keyboard())
         context.user_data.clear()
@@ -1061,11 +1034,10 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
     
     if was_member and is_no_longer_member:
         logger.info(f"User {user.full_name} ({user.id}) left/was kicked from chat {result.chat.title}.")
-        await upsert_user_in_db({'user_id': user.id, 'is_verified': False}) # Mark as unverified
+        await upsert_user_in_db({'user_id': user.id, 'is_verified': False})
         
         referrer_id = await get_referrer(user.id)
         if referrer_id:
-            # Reconcile the referrer's score.
             changes = await reconcile_single_user(referrer_id, context)
             await get_users_with_cache(context, force_refresh=True)
             
@@ -1091,18 +1063,14 @@ def main() -> None:
 
     application = Application.builder().token(Config.BOT_TOKEN).job_queue(JobQueue()).build()
 
-    # Group 0: Handles critical status updates first.
     application.add_handler(ChatMemberHandler(handle_chat_member_updates, ChatMemberHandler.CHAT_MEMBER), group=0)
     
-    # Group 1: Handles explicit commands and button presses.
     application.add_handler(CommandHandler("start", start_command), group=1)
     application.add_handler(CommandHandler("invites", invites_command), group=1)
     application.add_handler(CommandHandler("link", link_command), group=1)
     application.add_handler(CommandHandler("top", top_command), group=1)
     application.add_handler(CallbackQueryHandler(button_handler), group=1)
 
-    # Group 2: Handles conversational input.
-    # We only want these handlers to work in private chats.
     private_chat_filter = filters.ChatType.PRIVATE
     application.add_handler(MessageHandler(filters.CONTACT & private_chat_filter, handle_contact), group=2)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_chat_filter, handle_verification_text), group=2)
