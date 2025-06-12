@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # --- Configuration ---
 # !!! استبدل هذه القيم بالقيم الحقيقية والسرية الخاصة بك !!!
-BOT_TOKEN = "7950170561:AAER-L3TyzKll--bl4n7FyPVxLxsFju6wSs"
+BOT_TOKEN = "7950170561:AAHMNKu1ysA66Vpiy-gID02gAkleRjQflb4"
 SUPABASE_URL = "https://jofxsqsgarvzolgphqjg.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
 
@@ -23,7 +23,7 @@ USERS_PER_PAGE = 15
 
 # --- Initialize Supabase Client ---
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY]):
-    print("FATAL: Missing required environment variables (BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY).")
+    print("FATAL: Missing required environment variables (BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY). Please set them in your .env file or hosting service.")
     exit()
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -65,16 +65,18 @@ def get_all_users_sorted_by(column="real_referrals"):
         return res.data or []
     except Exception: return []
 
+def get_all_referral_mappings():
+    try:
+        res = supabase.table('referrals').select("*").execute()
+        return res.data or []
+    except Exception: return []
+
 def get_user_counts():
     try:
         total_res = supabase.table('users').select('user_id', count='exact').execute()
-        total_count = total_res.count or 0
         verified_res = supabase.table('users').select('user_id', count='exact').eq('is_verified', True).execute()
-        verified_count = verified_res.count or 0
-        return total_count, verified_count
-    except Exception as e:
-        print(f"DB_ERROR: Getting user counts: {e}")
-        return 0, 0
+        return total_res.count or 0, verified_res.count or 0
+    except Exception as e: print(f"DB_ERROR: Getting user counts: {e}"); return 0, 0
         
 def add_referral_mapping(referred_id, referrer_id):
     try:
@@ -157,7 +159,7 @@ def get_main_menu_keyboard(user_id):
                 [InlineKeyboardButton("رابطي 🔗", callback_data="my_link")],
                 [InlineKeyboardButton("🏆 أفضل 5 متسابقين", callback_data="top_5")]]
     if is_owner:
-        keyboard.append([InlineKeyboardButton("👑 لوحة تحكم المالك 👑", callback_data="admin_panel")])
+        keyboard.append([InlineKeyboardButton("👑 لوحة تحكم المالك �", callback_data="admin_panel")])
     return InlineKeyboardMarkup(keyboard)
 
 def get_admin_panel_keyboard():
@@ -166,8 +168,15 @@ def get_admin_panel_keyboard():
                                  [InlineKeyboardButton("👥 عدد مستخدمي البوت", callback_data="admin_user_count")],
                                  [InlineKeyboardButton("🏆 اختيار فائز عشوائي", callback_data="pick_winner")],
                                  [InlineKeyboardButton("📢 إرسال رسالة للجميع", callback_data="admin_broadcast")],
+                                 [InlineKeyboardButton("🔧 أدوات التصحيح", callback_data="admin_correction_tools")],
                                  [InlineKeyboardButton("⚠️ تصفير كل الإحالات ⚠️", callback_data="admin_reset_all")],
                                  [InlineKeyboardButton("➡️ العودة للقائمة الرئيسية", callback_data="main_menu")]])
+
+def get_correction_tools_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 إعادة فحص المغادرين", callback_data="admin_recheck_leavers")],
+                                 [InlineKeyboardButton("✍️ تعديل مستخدم فردي", callback_data="admin_fix_individual")],
+                                 [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="admin_panel")]])
+
 def get_reset_confirmation_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("✅ نعم، قم بالتصفير", callback_data="admin_reset_confirm")],
                                  [InlineKeyboardButton("❌ لا، الغِ الأمر", callback_data="admin_panel")]])
@@ -204,7 +213,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if args:
         try:
             referrer_id = int(args[0])
-            if referrer_id != user.id and not await is_user_in_channel_and_group(user.id, context):
+            if referrer_id != user.id and not await is_user_in_channel_and_group(user.id, context) and 'referrer_id' not in context.user_data:
                 context.user_data['referrer_id'] = referrer_id
                 if not get_user_from_db(referrer_id):
                     upsert_user_in_db({'user_id': referrer_id, 'full_name': f"User_{referrer_id}", 'is_verified': False})
@@ -302,6 +311,27 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception as e:
                 fail_count += 1; print(f"Failed to send broadcast to {user_id}: {e}")
         await update.message.reply_text(f"✅ اكتملت الإذاعة.\n\n- تم الإرسال بنجاح إلى: {success_count} مستخدم.\n- فشل الإرسال إلى: {fail_count} مستخدم.")
+    
+    elif state == 'awaiting_fix_user_id':
+        try:
+            target_user_id = int(update.message.text)
+            del context.user_data['state']
+            target_user_info = get_user_from_db(target_user_id)
+            if not target_user_info:
+                await update.message.reply_text("لم يتم العثور على مستخدم بهذا الـ ID."); return
+            fake_refs = target_user_info.get("fake_referrals", 0)
+            if fake_refs <= 0:
+                await update.message.reply_text(f"المستخدم {target_user_info.get('full_name')} ليس لديه إحالات وهمية لتصحيحها."); return
+            new_real = target_user_info.get("real_referrals", 0) + 1
+            new_fake = fake_refs - 1
+            update_user_in_db(target_user_id, {'real_referrals': new_real, 'fake_referrals': new_fake})
+            confirmation_text = (f"✅ تم تعديل إحالات المستخدم: {target_user_info.get('full_name')}\n\n"
+                                 f"الرصيد الجديد:\n"
+                                 f"• الإحالات الحقيقية: **{new_real}**\n"
+                                 f"• الإحالات الوهمية: **{new_fake}**")
+            await update.message.reply_text(confirmation_text, parse_mode="Markdown")
+        except (ValueError): await update.message.reply_text("الرجاء إرسال ID رقمي صحيح فقط.")
+        except Exception as e: await update.message.reply_text(f"حدث خطأ: {e}"); context.user_data.pop('state', None)
 
 # --- Command and Button Handlers ---
 async def invites_command(update, context):
@@ -389,6 +419,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif query.data == "admin_broadcast" and is_owner:
         context.user_data['state'] = 'awaiting_broadcast_message'
         await query.edit_message_text(text="الآن، أرسل الرسالة التي تريد إذاعتها لجميع المستخدمين الموثقين.")
+    elif query.data == "admin_correction_tools" and is_owner:
+        await query.edit_message_text(text="🔧 **أدوات التصحيح**\n\nاختر الأداة التي تريد استخدامها:", reply_markup=get_correction_tools_keyboard())
+    elif query.data == "admin_recheck_leavers" and is_owner:
+        context.job_queue.run_once(recheck_leavers_and_notify, 1, chat_id=user_id, name=f"recheck_{user_id}")
+        await query.edit_message_text(text="تم جدولة فحص المغادرين. ستبدأ العملية في الخلفية وستصلك رسالة عند الانتهاء.", reply_markup=get_admin_panel_keyboard())
+    elif query.data == "admin_fix_individual" and is_owner:
+        context.user_data['state'] = 'awaiting_fix_user_id'
+        await query.edit_message_text(text="الرجاء إرسال الـ ID الرقمي للمستخدم الذي تريد تحويل إحدى إحالاته الوهمية إلى حقيقية.")
     elif query.data == "admin_reset_all" and is_owner:
         await query.edit_message_text(text="⚠️ **تأكيد الإجراء** ⚠️\n\nهل أنت متأكد؟ هذا الإجراء لا يمكن التراجع عنه.", parse_mode="Markdown", reply_markup=get_reset_confirmation_keyboard())
     elif query.data == "admin_reset_confirm" and is_owner:
@@ -413,7 +451,7 @@ def main() -> None:
     application.add_handler(CommandHandler("Invites", invites_command), group=1)
     application.add_handler(CommandHandler("link", link_command), group=1)
     application.add_handler(CommandHandler("Top", top_command), group=1)
-    application.add_handler(CommandHandler("fix", fix_referral_command), group=1) # The new command for owners
+    application.add_handler(CommandHandler("fix", fix_referral_command), group=1)
     application.add_handler(CallbackQueryHandler(button_handler), group=1)
     application.add_handler(MessageHandler(filters.CONTACT, handle_contact), group=1)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_verification_text), group=1)
@@ -422,4 +460,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
+�
