@@ -160,7 +160,6 @@ async def get_referrer(referred_id: int) -> Optional[int]:
         return None
     
 async def get_referrals_for_user(referrer_id: int) -> List[Dict[str, Any]]:
-    """Fetches all users referred by a specific referrer."""
     try:
         res = await run_sync_db(
             lambda: supabase.table('referrals')
@@ -230,10 +229,10 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
     if not all_users:
         return "🏆 **أفضل 5 متسابقين لدينا:**\n\nلم يصل أحد إلى القائمة بعد. كن أنت الأول!\n\n---\n**ترتيبك الشخصي:**\nلا يمكن عرض ترتيبك حالياً."
 
-    full_sorted_list = sorted(all_users, key=lambda u: u.get('real_referrals', 0), reverse=True)
+    full_sorted_list = sorted(all_users, key=lambda u: int(u.get('real_referrals', 0) or 0), reverse=True)
     
     text = "🏆 **أفضل 5 متسابقين لدينا:**\n\n"
-    top_5_users = [u for u in full_sorted_list if u.get("real_referrals", 0) > 0][:5]
+    top_5_users = [u for u in full_sorted_list if int(u.get("real_referrals", 0) or 0) > 0][:5]
     if not top_5_users:
         text += "لم يصل أحد إلى القائمة بعد. كن أنت الأول!\n"
     else:
@@ -711,20 +710,17 @@ async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.D
         logger.info(f"Forcing cache refresh for paginated report (type: {report_type}, page: {page}).")
         all_users = await get_users_with_cache(context, force_refresh=True)
         
-        sort_key, filter_positive = "", False
+        sort_key = ""
         if report_type == 'real':
             sort_key = 'real_referrals'
         elif report_type == 'fake':
             sort_key = 'fake_referrals'
-            filter_positive = True
         else:
             return
 
-        filtered_users = all_users
-        if filter_positive:
-            filtered_users = [u for u in all_users if u.get(sort_key, 0) > 0]
-            
-        filtered_users.sort(key=lambda u: u.get(sort_key, 0), reverse=True)
+        filtered_users = [u for u in all_users if int(u.get(sort_key, 0) or 0) > 0]
+        
+        filtered_users.sort(key=lambda u: int(u.get(sort_key, 0) or 0), reverse=True)
 
         text, keyboard = get_paginated_report(filtered_users, page, report_type)
         await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
