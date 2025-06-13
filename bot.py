@@ -56,6 +56,7 @@ class Config:
     }
     USERS_PER_PAGE = 15
     CACHE_TTL_SECONDS = 60
+    MENTION_CACHE_TTL_SECONDS = 300 # Cache for user mentions (5 minutes)
 
 
 class State(Enum):
@@ -117,16 +118,31 @@ def clean_name_for_markdown(name: str) -> str:
     return re.sub(r"([*_`\[\]\(\)])", "", name)
 
 async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
+    cache = context.bot_data.setdefault('mention_cache', {})
+    current_time = time.time()
+    
+    if user_id in cache and (current_time - cache[user_id]['timestamp'] < Config.MENTION_CACHE_TTL_SECONDS):
+        return cache[user_id]['mention']
+
     try:
         chat = await context.bot.get_chat(user_id)
         full_name = clean_name_for_markdown(chat.full_name)
-        return f"[{full_name}](tg://user?id={user_id})"
+        mention = f"[{full_name}](tg://user?id={user_id})"
+        
+        cache[user_id] = {'mention': mention, 'timestamp': current_time}
+
+        db_user_info = await get_user_from_db(user_id)
+        if db_user_info and (chat.full_name != db_user_info.get('full_name') or chat.username != db_user_info.get('username')):
+            context.job_queue.run_once(lambda _: upsert_user_in_db({'user_id': user_id, 'full_name': chat.full_name, 'username': chat.username}), 0)
+        
+        return mention
     except Exception:
-        # Fallback for users who can't be fetched
         db_user_info = await get_user_from_db(user_id)
         if db_user_info:
             full_name = clean_name_for_markdown(db_user_info.get("full_name", f"User {user_id}"))
-            return f"[{full_name}](tg://user?id={user_id})"
+            mention = f"[{full_name}](tg://user?id={user_id})"
+            cache[user_id] = {'mention': mention, 'timestamp': current_time}
+            return mention
         return f"[User {user_id}](tg://user?id={user_id})"
 
 
@@ -599,7 +615,7 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
                         await upsert_user_in_db({'user_id': referrer_id, 'real_referrals': new_real, 'fake_referrals': new_fake})
                         
                         await get_users_with_cache(context, force_refresh=True)
-                        mention = f"[{clean_name_for_markdown(user.full_name)}](tg://user?id={user.id})"
+                        mention = await get_user_mention(user.id, context)
                         await context.bot.send_message(
                             chat_id=referrer_id,
                             text=f"🎉 تهانينا! لقد انضم مستخدم جديد ({mention}) عن طريق رابطك.\n\n"
@@ -756,7 +772,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     if not query or not query.data: return
     
-    await query.answer()
+    try:
+        await query.answer()
+    except BadRequest as e:
+        if "Query is too old" in str(e):
+            logger.warning(f"Could not answer callback query {query.id}: {e}")
+        else:
+            raise
     
     if query.data == Callback.MAIN_MENU.value: await query.edit_message_text(text=Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(query.from_user.id))
     elif query.data == Callback.MY_REFERRALS.value: await handle_button_press(query, context, get_referral_stats_text, ParseMode.MARKDOWN)
@@ -955,7 +977,7 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
                 try:
                     referrer_db = await get_user_from_db(referrer_id)
                     new_real_count = get_total_real_referrals(referrer_db) if referrer_db else 'N/A'
-                    mention = f"[{clean_name_for_markdown(user.full_name)}](tg://user?id={user.id})"
+                    mention = await get_user_mention(user.id, context)
                     await context.bot.send_message(
                         chat_id=referrer_id,
                         text=f"⚠️ تنبيه! أحد المستخدمين الذين دعوتهم ({mention}) غادر.\n\n"
