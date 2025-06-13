@@ -33,13 +33,6 @@ from telegram.ext import (
 
 from supabase import Client, create_client
 
-# --- ملاحظة هامة جداً ---
-# قبل تشغيل هذا الكود، يجب عليك إضافة حقل جديد (column) إلى جدول 'users' في Supabase.
-# اسم الحقل: manual_referrals
-# نوع الحقل: int8
-# القيمة الافتراضية (Default Value): 0
-# -------------------------
-
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -279,7 +272,7 @@ def get_paginated_report(all_users: List[Dict[str, Any]], page: int, report_type
     page_users = all_users[start_index:end_index]
     total_pages = math.ceil(len(all_users) / Config.USERS_PER_PAGE)
 
-    title = "� *تقرير الإحالات الحقيقية*" if report_type == 'real' else "⏳ *تقرير الإحالات الوهمية*"
+    title = "📊 *تقرير الإحالات الحقيقية*" if report_type == 'real' else "⏳ *تقرير الإحالات الوهمية*"
     report = f"{title} (صفحة {page} من {total_pages}):\n\n"
     
     for u_info in page_users:
