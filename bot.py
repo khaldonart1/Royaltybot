@@ -115,7 +115,15 @@ except Exception as e:
 def clean_name(name: str) -> str:
     if not name:
         return ""
-    return re.sub(r"([*_`\[])", "", name)
+    return re.sub(r"([*_`\[\]\(\)])", "", name)
+
+def get_user_display(user_info: Dict[str, Any]) -> str:
+    full_name = clean_name(user_info.get("full_name", ""))
+    username = user_info.get("username")
+    if username:
+        return f"{full_name} (@{username})"
+    return f"{full_name} (`{user_info.get('user_id')}`)"
+
 
 async def run_sync_db(func: Callable[[], Any]) -> Any:
     return await asyncio.to_thread(func)
@@ -236,15 +244,13 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
 
     full_sorted_list = sorted(all_users, key=lambda u: get_total_real_referrals(u), reverse=True)
     
-    text = "🏆 *أفضل 5 متسابقين لدينا:*\n\n"
+    text = "� *أفضل 5 متسابقين لدينا:*\n\n"
     top_5_users = [u for u in full_sorted_list if get_total_real_referrals(u) > 0][:5]
     if not top_5_users:
         text += "لم يصل أحد إلى القائمة بعد. كن أنت الأول!\n"
     else:
         for i, u_info in enumerate(top_5_users):
-            full_name = clean_name(u_info.get("full_name", f"User_{u_info.get('user_id')}"))
-            username = u_info.get("username")
-            display_name = f"{full_name} (@{username})" if username else full_name
+            display_name = get_user_display(u_info)
             count = get_total_real_referrals(u_info)
             text += f"{i+1}. {display_name} - *{count}* إحالة\n"
     
@@ -278,10 +284,7 @@ def get_paginated_report(all_users: List[Dict[str, Any]], page: int, report_type
     report = f"{title} (صفحة {page} من {total_pages}):\n\n"
     
     for u_info in page_users:
-        full_name = clean_name(u_info.get('full_name', f"User_{u_info.get('user_id')}"))
-        username = u_info.get("username")
-        display_name = f"{full_name} (@{username})" if username else full_name
-        user_id = u_info.get('user_id')
+        display_name = get_user_display(u_info)
         
         count = 0
         if report_type == 'real':
@@ -289,7 +292,7 @@ def get_paginated_report(all_users: List[Dict[str, Any]], page: int, report_type
         else:
             count = int(u_info.get('fake_referrals', 0) or 0)
         
-        report += f"• {display_name} (`{user_id}`) - *{count}*\n"
+        report += f"• {display_name} - *{count}*\n"
         
     nav_buttons = []
     callback_prefix = f"{Callback.REPORT_PAGE.value}{report_type}_page_"
@@ -308,7 +311,7 @@ def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏆 أفضل 5 متسابقين", callback_data=Callback.TOP_5.value)],
     ]
     if user_id in Config.BOT_OWNER_IDS:
-        keyboard.append([InlineKeyboardButton("👑 لوحة تحكم المالك �", callback_data=Callback.ADMIN_PANEL.value)])
+        keyboard.append([InlineKeyboardButton("👑 لوحة تحكم المالك 👑", callback_data=Callback.ADMIN_PANEL.value)])
     return InlineKeyboardMarkup(keyboard)
 
 def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
@@ -803,10 +806,8 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             response_text = f"✅ *قائمة الإحالات الـ{list_type} للمستخدم {clean_name(target_user.get('full_name'))} ({len(referral_ids)}):*\n\n"
             for ref_id in referral_ids:
                 ref_user_info = user_map.get(ref_id)
-                full_name = clean_name(ref_user_info.get('full_name', 'اسم غير معروف')) if ref_user_info else "مستخدم محذوف"
-                username = ref_user_info.get('username') if ref_user_info else None
-                display_name = f"{full_name} (@{username})" if username else full_name
-                response_text += f"- *الاسم:* {display_name}\n  - *ID:* `{ref_id}`\n"
+                display_name = get_user_display(ref_user_info) if ref_user_info else f"مستخدم محذوف (`{ref_id}`)"
+                response_text += f"• {display_name}\n"
 
             await update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
         except (ValueError, TypeError):
@@ -883,12 +884,10 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text(f"لا يوجد مستخدمون موثقون لديهم {threshold} إحالة حقيقية أو أكثر.", reply_markup=get_admin_panel_keyboard())
             else:
                 winner = random.choice(eligible)
-                winner_username = winner.get('username')
-                winner_display = f"(@{winner_username})" if winner_username else ""
+                display_name = get_user_display(winner)
                 await update.message.reply_text(
                     f"🎉 *الفائز هو*!!!\n\n"
-                    f"*الاسم:* {clean_name(winner.get('full_name'))} {winner_display}\n"
-                    f"*ID:* `{winner.get('user_id')}`\n"
+                    f"*المستخدم:* {display_name}\n"
                     f"*عدد الإحالات:* {get_total_real_referrals(winner)}\n\nتهانينا!",
                     parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard()
                 )
