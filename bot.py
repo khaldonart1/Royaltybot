@@ -33,6 +33,13 @@ from telegram.ext import (
 
 from supabase import Client, create_client
 
+# --- ملاحظة هامة جداً ---
+# قبل تشغيل هذا الكود، يجب عليك إضافة حقل جديد (column) إلى جدول 'users' في Supabase.
+# اسم الحقل: manual_referrals
+# نوع الحقل: int8
+# القيمة الافتراضية (Default Value): 0
+# -------------------------
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -113,7 +120,6 @@ except Exception as e:
     exit(1)
 
 def clean_name(name: str) -> str:
-    """Removes characters that conflict with legacy Markdown."""
     if not name:
         return ""
     return re.sub(r"([*_`\[])", "", name)
@@ -124,7 +130,7 @@ async def run_sync_db(func: Callable[[], Any]) -> Any:
 async def get_user_from_db(user_id: int) -> Optional[Dict[str, Any]]:
     try:
         res = await run_sync_db(
-            lambda: supabase.table('users').select("user_id, full_name, real_referrals, fake_referrals, is_verified").eq('user_id', user_id).single().execute()
+            lambda: supabase.table('users').select("user_id, full_name, real_referrals, fake_referrals, is_verified, manual_referrals").eq('user_id', user_id).single().execute()
         )
         return res.data
     except Exception:
@@ -147,7 +153,7 @@ async def get_all_users_from_db() -> List[Dict[str, Any]]:
     try:
         res = await run_sync_db(
             lambda: supabase.table('users').select(
-                "user_id, full_name, real_referrals, fake_referrals, is_verified"
+                "user_id, full_name, real_referrals, fake_referrals, is_verified, manual_referrals"
             ).execute()
         )
         return res.data or []
@@ -196,7 +202,7 @@ async def add_referral_mapping(referred_id: int, referrer_id: int) -> None:
 
 async def reset_all_referrals_in_db() -> None:
     try:
-        await run_sync_db(lambda: supabase.table('users').update({"real_referrals": 0, "fake_referrals": 0}).gt('user_id', 0).execute())
+        await run_sync_db(lambda: supabase.table('users').update({"real_referrals": 0, "fake_referrals": 0, "manual_referrals": 0}).gt('user_id', 0).execute())
         await run_sync_db(lambda: supabase.table('referrals').delete().gt('referred_user_id', 0).execute())
         logger.info("All referrals have been reset in the database.")
     except Exception as e:
@@ -215,11 +221,16 @@ async def get_users_with_cache(context: ContextTypes.DEFAULT_TYPE, force_refresh
     
     return cache.get('data', [])
 
+def get_total_real_referrals(user_info: Dict[str, Any]) -> int:
+    organic_real = user_info.get("real_referrals", 0) or 0
+    manual_real = user_info.get("manual_referrals", 0) or 0
+    return organic_real + manual_real
+
 def get_referral_stats_text(user_info: Optional[Dict[str, Any]]) -> str:
     if not user_info: return "لا توجد لديك بيانات بعد. حاول مرة أخرى."
-    real = user_info.get("real_referrals", 0) or 0
+    total_real = get_total_real_referrals(user_info)
     fake = user_info.get("fake_referrals", 0) or 0
-    return f"📊 *إحصائيات إحالاتك:*\n\n✅ الإحالات الحقيقية: *{real}*\n⏳ الإحالات الوهمية: *{fake}*"
+    return f"📊 *إحصائيات إحالاتك:*\n\n✅ الإحالات الحقيقية: *{total_real}*\n⏳ الإحالات الوهمية: *{fake}*"
 
 def get_referral_link_text(user_id: int, bot_username: str) -> str:
     return f"🔗 رابط الإحالة الخاص بك:\n`https://t.me/{bot_username}?start={user_id}`"
@@ -230,16 +241,16 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
     if not all_users:
         return "🏆 *أفضل 5 متسابقين لدينا:*\n\nلم يصل أحد إلى القائمة بعد. كن أنت الأول!\n\n---\n*ترتيبك الشخصي:*\nلا يمكن عرض ترتيبك حالياً."
 
-    full_sorted_list = sorted(all_users, key=lambda u: int(u.get('real_referrals', 0) or 0), reverse=True)
+    full_sorted_list = sorted(all_users, key=lambda u: get_total_real_referrals(u), reverse=True)
     
     text = "🏆 *أفضل 5 متسابقين لدينا:*\n\n"
-    top_5_users = [u for u in full_sorted_list if int(u.get("real_referrals", 0) or 0) > 0][:5]
+    top_5_users = [u for u in full_sorted_list if get_total_real_referrals(u) > 0][:5]
     if not top_5_users:
         text += "لم يصل أحد إلى القائمة بعد. كن أنت الأول!\n"
     else:
         for i, u_info in enumerate(top_5_users):
             full_name = clean_name(u_info.get("full_name", f"User_{u_info.get('user_id')}"))
-            count = u_info.get("real_referrals", 0)
+            count = get_total_real_referrals(u_info)
             text += f"{i+1}. {full_name} - *{count}* إحالة\n"
     
     text += "\n---\n*ترتيبك الشخصي:*\n"
@@ -248,7 +259,7 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
         my_referrals = 0
         if user_index != -1:
             rank_str = f"#{user_index + 1}"
-            my_referrals = full_sorted_list[user_index].get("real_referrals", 0) or 0
+            my_referrals = get_total_real_referrals(full_sorted_list[user_index])
         else:
             rank_str = "غير مصنف"
         
@@ -268,13 +279,19 @@ def get_paginated_report(all_users: List[Dict[str, Any]], page: int, report_type
     page_users = all_users[start_index:end_index]
     total_pages = math.ceil(len(all_users) / Config.USERS_PER_PAGE)
 
-    title = "📊 *تقرير الإحالات الحقيقية*" if report_type == 'real' else "⏳ *تقرير الإحالات الوهمية*"
+    title = "� *تقرير الإحالات الحقيقية*" if report_type == 'real' else "⏳ *تقرير الإحالات الوهمية*"
     report = f"{title} (صفحة {page} من {total_pages}):\n\n"
     
     for u_info in page_users:
         full_name = clean_name(u_info.get('full_name', f"User_{u_info.get('user_id')}"))
         user_id = u_info.get('user_id')
-        count = u_info.get('real_referrals' if report_type == 'real' else 'fake_referrals', 0) or 0
+        
+        count = 0
+        if report_type == 'real':
+            count = get_total_real_referrals(u_info)
+        else:
+            count = u_info.get('fake_referrals', 0) or 0
+        
         report += f"• {full_name} (`{user_id}`) - *{count}*\n"
         
     nav_buttons = []
@@ -327,8 +344,8 @@ def get_booo_menu_keyboard() -> InlineKeyboardMarkup:
 
 def get_user_edit_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ زيادة إحالة حقيقية", callback_data=Callback.USER_ADD_REAL.value)],
-        [InlineKeyboardButton("➖ خصم إحالة حقيقية", callback_data=Callback.USER_REMOVE_REAL.value)],
+        [InlineKeyboardButton("➕ زيادة إحالة حقيقية (يدوي)", callback_data=Callback.USER_ADD_REAL.value)],
+        [InlineKeyboardButton("➖ خصم إحالة حقيقية (يدوي)", callback_data=Callback.USER_REMOVE_REAL.value)],
         [InlineKeyboardButton("➕ زيادة إحالة وهمية", callback_data=Callback.USER_ADD_FAKE.value)],
         [InlineKeyboardButton("➖ خصم إحالة وهمية", callback_data=Callback.USER_REMOVE_FAKE.value)],
         [InlineKeyboardButton("🔙 العودة لقائمة Booo", callback_data=Callback.ADMIN_BOOO_MENU.value)]
@@ -410,7 +427,8 @@ async def basic_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(
         text, 
         parse_mode=parse_mode, 
-        reply_markup=get_main_menu_keyboard(user_id)
+        reply_markup=get_main_menu_keyboard(user_id),
+        disable_web_page_preview=True
     )
 
 async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -610,11 +628,12 @@ async def handle_button_press(query: CallbackQuery, context: ContextTypes.DEFAUL
         await query.edit_message_text(
             text,
             parse_mode=parse_mode,
-            reply_markup=get_main_menu_keyboard(user_id)
+            reply_markup=get_main_menu_keyboard(user_id),
+            disable_web_page_preview=True
         )
     except BadRequest as e:
         if "message is not modified" in str(e).lower():
-            await query.answer("لم تتغير البيانات.", show_alert=False)
+            await query.answer()
         else:
             logger.error(f"BadRequest on button press: {e}. Text: {text}")
             await query.answer("حدث خطأ في عرض البيانات.", show_alert=True)
@@ -699,16 +718,14 @@ async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.D
         
         all_users = await get_users_with_cache(context, force_refresh=True)
         
-        sort_key = ""
         if report_type == 'real':
-            sort_key = 'real_referrals'
+            filtered_users = [u for u in all_users if get_total_real_referrals(u) > 0]
+            filtered_users.sort(key=lambda u: get_total_real_referrals(u), reverse=True)
         elif report_type == 'fake':
-            sort_key = 'fake_referrals'
+            filtered_users = [u for u in all_users if (u.get('fake_referrals', 0) or 0) > 0]
+            filtered_users.sort(key=lambda u: (u.get('fake_referrals', 0) or 0), reverse=True)
         else:
             return
-
-        filtered_users = [u for u in all_users if int(u.get(sort_key, 0) or 0) > 0]
-        filtered_users.sort(key=lambda u: int(u.get(sort_key, 0) or 0), reverse=True)
 
         text, keyboard = get_paginated_report(filtered_users, page, report_type)
         await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
@@ -793,10 +810,12 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             context.user_data['state'] = State.AWAITING_EDIT_AMOUNT
             context.user_data['target_id'] = target_user_id
             
-            action_map = {c.value: s for c, s in [
-                (Callback.USER_ADD_REAL, "إضافة إحالات حقيقية"), (Callback.USER_REMOVE_REAL, "خصم إحالات حقيقية"),
-                (Callback.USER_ADD_FAKE, "إضافة إحالات وهمية"), (Callback.USER_REMOVE_FAKE, "خصم إحالات وهمية")
-            ]}
+            action_map = {
+                Callback.USER_ADD_REAL.value: "إضافة إحالات حقيقية (يدوي)",
+                Callback.USER_REMOVE_REAL.value: "خصم إحالات حقيقية (يدوي)",
+                Callback.USER_ADD_FAKE.value: "إضافة إحالات وهمية",
+                Callback.USER_REMOVE_FAKE.value: "خصم إحالات وهمية"
+            }
             action_type = context.user_data.get('action_type')
             prompt = (f"المستخدم: *{clean_name(user_to_fix.get('full_name'))}* (`{target_user_id}`)\n"
                       f"الإجراء: *{action_map.get(action_type, 'غير معروف')}*\n\n"
@@ -820,12 +839,19 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             user_to_fix = await get_user_from_db(target_user_id)
             if not user_to_fix: return
             
-            real, fake = (user_to_fix.get('real_referrals', 0) or 0), (user_to_fix.get('fake_referrals', 0) or 0)
             update_data = {}
-            if action_type == Callback.USER_ADD_REAL.value: update_data = {'real_referrals': real + amount}
-            elif action_type == Callback.USER_REMOVE_REAL.value: update_data = {'real_referrals': max(0, real - amount)}
-            elif action_type == Callback.USER_ADD_FAKE.value: update_data = {'fake_referrals': fake + amount}
-            elif action_type == Callback.USER_REMOVE_FAKE.value: update_data = {'fake_referrals': max(0, fake - amount)}
+            if action_type == Callback.USER_ADD_REAL.value:
+                current_manual = user_to_fix.get('manual_referrals', 0) or 0
+                update_data = {'manual_referrals': current_manual + amount}
+            elif action_type == Callback.USER_REMOVE_REAL.value:
+                current_manual = user_to_fix.get('manual_referrals', 0) or 0
+                update_data = {'manual_referrals': max(0, current_manual - amount)}
+            elif action_type == Callback.USER_ADD_FAKE.value:
+                current_fake = user_to_fix.get('fake_referrals', 0) or 0
+                update_data = {'fake_referrals': current_fake + amount}
+            elif action_type == Callback.USER_REMOVE_FAKE.value:
+                current_fake = user_to_fix.get('fake_referrals', 0) or 0
+                update_data = {'fake_referrals': max(0, current_fake - amount)}
 
             if update_data:
                 await upsert_user_in_db({'user_id': target_user_id, **update_data})
@@ -838,7 +864,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             threshold = int(text)
             all_users = await get_all_users_from_db()
-            eligible = [u for u in all_users if (u.get('real_referrals', 0) or 0) >= threshold and u.get('is_verified')]
+            eligible = [u for u in all_users if get_total_real_referrals(u) >= threshold and u.get('is_verified')]
             
             if not eligible:
                 await update.message.reply_text(f"لا يوجد مستخدمون موثقون لديهم {threshold} إحالة حقيقية أو أكثر.", reply_markup=get_admin_panel_keyboard())
@@ -848,7 +874,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                     f"🎉 *الفائز هو*!!!\n\n"
                     f"*الاسم:* {clean_name(winner.get('full_name'))}\n"
                     f"*ID:* `{winner.get('user_id')}`\n"
-                    f"*عدد الإحالات:* {winner.get('real_referrals')}\n\nتهانينا!",
+                    f"*عدد الإحالات:* {get_total_real_referrals(winner)}\n\nتهانينا!",
                     parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard()
                 )
         except (ValueError, TypeError):
@@ -879,7 +905,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if new_user_data:
                 await update.message.reply_text(
                     f"✅ اكتمل الفحص. تم إجراء *{changes}* تعديل.\n"
-                    f"البيانات الجديدة للمستخدم: *{new_user_data.get('real_referrals', 0)}* حقيقي, *{new_user_data.get('fake_referrals',0)}* وهمي.",
+                    f"البيانات الجديدة للمستخدم: *{get_total_real_referrals(new_user_data)}* حقيقي, *{new_user_data.get('fake_referrals',0)}* وهمي.",
                     parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard()
                 )
         except (ValueError, TypeError):
@@ -905,7 +931,7 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
             if changes > 0:
                 try:
                     referrer_db = await get_user_from_db(referrer_id)
-                    new_real_count = (referrer_db.get('real_referrals', 0) or 0) if referrer_db else 'N/A'
+                    new_real_count = get_total_real_referrals(referrer_db) if referrer_db else 'N/A'
                     cleaned_name = clean_name(user.full_name)
                     await context.bot.send_message(
                         chat_id=referrer_id,
