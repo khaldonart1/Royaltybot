@@ -112,18 +112,25 @@ except Exception as e:
     logger.critical(f"FATAL: Failed to connect to Supabase. Error: {e}")
     exit(1)
 
-def clean_name(name: str) -> str:
-    if not name:
-        return ""
+def clean_name_for_markdown(name: str) -> str:
+    if not name: return ""
     return re.sub(r"([*_`\[\]\(\)])", "", name)
 
-def get_user_display(user_info: Dict[str, Any]) -> str:
-    full_name = clean_name(user_info.get("full_name", ""))
-    username = user_info.get("username")
-    if username:
-        return f"{full_name} (@{username})"
-    return f"{full_name} (`{user_info.get('user_id')}`)"
-
+async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE, db_user_info: Optional[Dict[str, Any]] = None) -> str:
+    try:
+        chat = await context.bot.get_chat(user_id)
+        full_name = clean_name_for_markdown(chat.full_name)
+        if db_user_info and (chat.full_name != db_user_info.get('full_name') or chat.username != db_user_info.get('username')):
+            context.job_queue.run_once(lambda _: upsert_user_in_db({'user_id': user_id, 'full_name': chat.full_name, 'username': chat.username}), 0)
+        return f"[{full_name}](tg://user?id={user_id})"
+    except Exception as e:
+        logger.warning(f"Could not fetch fresh user data for {user_id} via get_chat: {e}. Falling back to DB.")
+        if not db_user_info:
+            db_user_info = await get_user_from_db(user_id)
+        if db_user_info:
+            full_name = clean_name_for_markdown(db_user_info.get("full_name", f"User {user_id}"))
+            return f"[{full_name}](tg://user?id={user_id})"
+        return f"[User {user_id}](tg://user?id={user_id})"
 
 async def run_sync_db(func: Callable[[], Any]) -> Any:
     return await asyncio.to_thread(func)
@@ -244,15 +251,16 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
 
     full_sorted_list = sorted(all_users, key=lambda u: get_total_real_referrals(u), reverse=True)
     
-    text = "� *أفضل 5 متسابقين لدينا:*\n\n"
+    text = "🏆 *أفضل 5 متسابقين لدينا:*\n\n"
     top_5_users = [u for u in full_sorted_list if get_total_real_referrals(u) > 0][:5]
     if not top_5_users:
         text += "لم يصل أحد إلى القائمة بعد. كن أنت الأول!\n"
     else:
+        mentions = await asyncio.gather(*[get_user_mention(u['user_id'], context, u) for u in top_5_users])
         for i, u_info in enumerate(top_5_users):
-            display_name = get_user_display(u_info)
+            mention = mentions[i]
             count = get_total_real_referrals(u_info)
-            text += f"{i+1}. {display_name} - *{count}* إحالة\n"
+            text += f"{i+1}. {mention} - *{count}* إحالة\n"
     
     text += "\n---\n*ترتيبك الشخصي:*\n"
     try:
@@ -271,7 +279,7 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
         
     return text
 
-def get_paginated_report(all_users: List[Dict[str, Any]], page: int, report_type: str) -> Tuple[str, InlineKeyboardMarkup]:
+async def get_paginated_report(all_users: List[Dict[str, Any]], page: int, report_type: str, context: ContextTypes.DEFAULT_TYPE) -> Tuple[str, InlineKeyboardMarkup]:
     if not all_users:
         return "لا يوجد أي مستخدمين في هذا التقرير حالياً.", get_admin_panel_keyboard()
 
@@ -283,16 +291,17 @@ def get_paginated_report(all_users: List[Dict[str, Any]], page: int, report_type
     title = "📊 *تقرير الإحالات الحقيقية*" if report_type == 'real' else "⏳ *تقرير الإحالات الوهمية*"
     report = f"{title} (صفحة {page} من {total_pages}):\n\n"
     
-    for u_info in page_users:
-        display_name = get_user_display(u_info)
-        
+    mentions = await asyncio.gather(*[get_user_mention(u['user_id'], context, u) for u in page_users])
+    
+    for i, u_info in enumerate(page_users):
+        mention = mentions[i]
         count = 0
         if report_type == 'real':
             count = get_total_real_referrals(u_info)
         else:
             count = int(u_info.get('fake_referrals', 0) or 0)
         
-        report += f"• {display_name} - *{count}*\n"
+        report += f"• {mention} - *{count}*\n"
         
     nav_buttons = []
     callback_prefix = f"{Callback.REPORT_PAGE.value}{report_type}_page_"
@@ -592,10 +601,10 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
                         await upsert_user_in_db({'user_id': referrer_id, 'real_referrals': new_real, 'fake_referrals': new_fake})
                         
                         await get_users_with_cache(context, force_refresh=True)
-                        cleaned_name = clean_name(user.full_name)
+                        mention = f"[{clean_name_for_markdown(user.full_name)}](tg://user?id={user.id})"
                         await context.bot.send_message(
                             chat_id=referrer_id,
-                            text=f"🎉 تهانينا! لقد انضم مستخدم جديد (*{cleaned_name}*) عن طريق رابطك.\n\n"
+                            text=f"🎉 تهانينا! لقد انضم مستخدم جديد ({mention}) عن طريق رابطك.\n\n"
                                  f"رصيدك الجديد هو: *{new_real}* إحالة حقيقية.",
                             parse_mode=ParseMode.MARKDOWN
                         )
@@ -709,7 +718,7 @@ async def handle_recheck_leavers(query: CallbackQuery, context: ContextTypes.DEF
     await query.edit_message_text(text="تم جدولة فحص المغادرين. ستبدأ العملية المحسّنة في الخلفية وستصلك رسالة عند الانتهاء.", reply_markup=get_admin_panel_keyboard())
 
 async def handle_user_edit_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await query.edit_message_text(text="👤 *تعديل المستخدم*\n\nاختر الإجراء المطلوب:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_user_edit_keyboard())
+    await query.edit_message_text(text="� *تعديل المستخدم*\n\nاختر الإجراء المطلوب:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_user_edit_keyboard())
 
 async def handle_user_edit_action(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['state'] = State.AWAITING_EDIT_USER_ID
@@ -736,7 +745,7 @@ async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.D
         else:
             return
 
-        text, keyboard = get_paginated_report(filtered_users, page, report_type)
+        text, keyboard = await get_paginated_report(filtered_users, page, report_type, context)
         await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
     except BadRequest as e:
         if "message is not modified" in str(e).lower():
@@ -787,7 +796,8 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 return
             
             list_type = "الحقيقية" if state == State.AWAITING_REAL_REFERRAL_LIST_USER_ID else "الوهمية"
-            await update.message.reply_text(f"⏳ جارٍ جلب قائمة الإحالات *{list_type}* للمستخدم {clean_name(target_user.get('full_name'))}...")
+            mention = await get_user_mention(target_user_id, context, target_user)
+            await update.message.reply_text(f"⏳ جارٍ جلب قائمة الإحالات *{list_type}* للمستخدم {mention}...", parse_mode=ParseMode.MARKDOWN)
 
             all_users = await get_all_users_from_db()
             verified_user_ids = {u['user_id'] for u in all_users if u.get('is_verified')}
@@ -795,19 +805,19 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
 
             if state == State.AWAITING_REAL_REFERRAL_LIST_USER_ID:
                 referral_ids = [ref['referred_user_id'] for ref in user_referrals if ref['referred_user_id'] in verified_user_ids]
-            else: # FAKE
+            else: 
                 referral_ids = [ref['referred_user_id'] for ref in user_referrals if ref['referred_user_id'] not in verified_user_ids]
 
             if not referral_ids:
-                await update.message.reply_text(f"المستخدم *{clean_name(target_user.get('full_name'))}* ليس لديه أي إحالات {list_type}.", parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
+                await update.message.reply_text(f"المستخدم {mention} ليس لديه أي إحالات {list_type}.", parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
                 return
             
             user_map = {u['user_id']: u for u in all_users}
-            response_text = f"✅ *قائمة الإحالات الـ{list_type} للمستخدم {clean_name(target_user.get('full_name'))} ({len(referral_ids)}):*\n\n"
-            for ref_id in referral_ids:
-                ref_user_info = user_map.get(ref_id)
-                display_name = get_user_display(ref_user_info) if ref_user_info else f"مستخدم محذوف (`{ref_id}`)"
-                response_text += f"• {display_name}\n"
+            response_text = f"✅ *قائمة الإحالات الـ{list_type} للمستخدم {mention} ({len(referral_ids)}):*\n\n"
+            
+            mentions = await asyncio.gather(*[get_user_mention(ref_id, context, user_map.get(ref_id)) for ref_id in referral_ids])
+            for user_mention in mentions:
+                response_text += f"• {user_mention}\n"
 
             await update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
         except (ValueError, TypeError):
@@ -829,7 +839,8 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 Callback.USER_REMOVE_MANUAL.value: "خصم إحالات (يدوي)",
             }
             action_type = context.user_data.get('action_type')
-            prompt = (f"المستخدم: *{clean_name(user_to_fix.get('full_name'))}* (`{target_user_id}`)\n"
+            mention = await get_user_mention(target_user_id, context, user_to_fix)
+            prompt = (f"المستخدم: {mention}\n"
                       f"الإجراء: *{action_map.get(action_type, 'غير معروف')}*\n\n"
                       "الرجاء إرسال العدد الذي تريد تطبيقه.")
             await update.message.reply_text(prompt, parse_mode=ParseMode.MARKDOWN)
@@ -864,8 +875,9 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 await get_users_with_cache(context, force_refresh=True)
                 new_user_data = await get_user_from_db(target_user_id)
                 
+                mention = await get_user_mention(target_user_id, context, new_user_data)
                 final_text = (f"✅ تم التعديل بنجاح.\n\n"
-                              f"المستخدم: *{clean_name(new_user_data.get('full_name'))}*\n"
+                              f"المستخدم: {mention}\n"
                               f"الرصيد الجديد:\n"
                               f"- *{get_total_real_referrals(new_user_data)}* إحالة حقيقية\n"
                               f"- *{int(new_user_data.get('fake_referrals', 0) or 0)}* إحالة وهمية")
@@ -884,10 +896,10 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text(f"لا يوجد مستخدمون موثقون لديهم {threshold} إحالة حقيقية أو أكثر.", reply_markup=get_admin_panel_keyboard())
             else:
                 winner = random.choice(eligible)
-                display_name = get_user_display(winner)
+                mention = await get_user_mention(winner['user_id'], context, winner)
                 await update.message.reply_text(
                     f"🎉 *الفائز هو*!!!\n\n"
-                    f"*المستخدم:* {display_name}\n"
+                    f"*المستخدم:* {mention}\n"
                     f"*عدد الإحالات:* {get_total_real_referrals(winner)}\n\nتهانينا!",
                     parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard()
                 )
@@ -946,10 +958,10 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
                 try:
                     referrer_db = await get_user_from_db(referrer_id)
                     new_real_count = get_total_real_referrals(referrer_db) if referrer_db else 'N/A'
-                    cleaned_name = clean_name(user.full_name)
+                    mention = f"[{clean_name_for_markdown(user.full_name)}](tg://user?id={user.id})"
                     await context.bot.send_message(
                         chat_id=referrer_id,
-                        text=f"⚠️ تنبيه! أحد المستخدمين الذين دعوتهم (*{cleaned_name}*) غادر.\n\n"
+                        text=f"⚠️ تنبيه! أحد المستخدمين الذين دعوتهم ({mention}) غادر.\n\n"
                              f"تم تحديث رصيدك. رصيدك الحالي هو: *{new_real_count}* إحالة حقيقية.",
                         parse_mode=ParseMode.MARKDOWN
                     )
