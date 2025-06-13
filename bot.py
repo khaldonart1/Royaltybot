@@ -165,11 +165,13 @@ async def run_sync_db(func: Callable[[], Any]) -> Any:
 async def get_user_from_db(user_id: int) -> Optional[Dict[str, Any]]:
     """جلب مستخدم واحد من قاعدة البيانات"""
     try:
+        # **ملاحظة:** تأكد من أن عمود `manual_fake_adjustment` موجود في جدول `users`
         res = await run_sync_db(
             lambda: supabase.table('users').select("*, manual_fake_adjustment").eq('user_id', user_id).single().execute()
         )
         return res.data
     except Exception:
+        # Supabase returns an error if the row doesn't exist, which we can treat as None
         return None
 
 async def upsert_user_in_db(user_data: Dict[str, Any]) -> None:
@@ -190,6 +192,7 @@ async def upsert_users_batch(users_data: List[Dict[str, Any]]) -> None:
 async def get_all_users_from_db() -> List[Dict[str, Any]]:
     """جلب كل المستخدمين من قاعدة البيانات"""
     try:
+        # **ملاحظة:** تأكد من أن عمود `manual_fake_adjustment` موجود في جدول `users`
         res = await run_sync_db(
             lambda: supabase.table('users').select("*, manual_fake_adjustment").execute()
         )
@@ -873,11 +876,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # --- معالج رسائل المالك (Admin Message Handler) ---
 async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    state = context.user_data.pop('state', None)
+    state = context.user_data.get('state') # Use .get() to avoid popping the state prematurely
     if not state or not update.message or not update.message.text: return
     text = update.message.text
 
     if state == State.AWAITING_REAL_REFERRAL_LIST_USER_ID or state == State.AWAITING_FAKE_REFERRAL_LIST_USER_ID:
+        # This part remains the same
+        context.user_data.pop('state', None) # Pop state after handling
         try:
             target_user_id = int(text)
             target_user = await get_user_from_db(target_user_id)
@@ -922,6 +927,8 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             user_to_fix = await get_user_from_db(target_user_id)
             if not user_to_fix:
                 await update.message.reply_text("لم يتم العثور على مستخدم بهذا الـ ID.", reply_markup=get_admin_panel_keyboard())
+                # Clear state if user not found
+                context.user_data.clear()
                 return
 
             context.user_data['state'] = State.AWAITING_EDIT_AMOUNT
@@ -941,21 +948,31 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text(prompt, parse_mode=ParseMode.MARKDOWN)
         except (ValueError, TypeError):
             await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
-
+            # Don't clear state, allow user to try again
+    
+    # --- *** تم إصلاح هذا الجزء بالكامل *** ---
     elif state == State.AWAITING_EDIT_AMOUNT:
+        target_user_id = context.user_data.get('target_id')
+        action_type = context.user_data.get('action_type')
+        
+        if not target_user_id or not action_type:
+            context.user_data.clear()
+            await update.message.reply_text("حدث خطأ في السياق. الرجاء البدء من جديد.", reply_markup=get_admin_panel_keyboard())
+            return
+            
         try:
             amount = int(text)
             if amount <= 0:
-                context.user_data['state'] = State.AWAITING_EDIT_AMOUNT
                 await update.message.reply_text("الرجاء إرسال عدد صحيح أكبر من صفر.")
                 return
 
-            target_user_id = context.user_data.pop('target_id', None)
-            action_type = context.user_data.pop('action_type', None)
-            if not target_user_id or not action_type: return
+            # Clear user_data only after successful validation
+            context.user_data.clear()
 
             user_to_fix = await get_user_from_db(target_user_id)
-            if not user_to_fix: return
+            if not user_to_fix: 
+                await update.message.reply_text("لم يتم العثور على المستخدم.", reply_markup=get_admin_panel_keyboard())
+                return
             
             update_data = {}
             current_manual_real = int(user_to_fix.get('manual_referrals', 0) or 0)
@@ -964,11 +981,11 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if action_type == Callback.USER_ADD_REAL.value:
                 update_data = {'manual_referrals': current_manual_real + amount}
             elif action_type == Callback.USER_REMOVE_REAL.value:
-                update_data = {'manual_referrals': current_manual_real - amount}
+                update_data = {'manual_referrals': max(0, current_manual_real - amount)}
             elif action_type == Callback.USER_ADD_FAKE.value:
                 update_data = {'manual_fake_adjustment': current_manual_fake + amount}
             elif action_type == Callback.USER_REMOVE_FAKE.value:
-                update_data = {'manual_fake_adjustment': current_manual_fake - amount}
+                update_data = {'manual_fake_adjustment': max(0, current_manual_fake - amount)}
 
             if update_data:
                 await upsert_user_in_db({'user_id': target_user_id, **update_data})
@@ -985,64 +1002,12 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                                   f"⏳ *{new_user_data.get('total_fake', 0)}* إحالة وهمية")
                     await update.message.reply_text(final_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
         except (ValueError, TypeError):
-            await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
-
-    elif state == State.AWAITING_WINNER_THRESHOLD:
-        try:
-            threshold = int(text)
-            accurate_counts = await get_accurate_referral_counts(context)
-            
-            eligible = [u for u in accurate_counts.values() if u['total_real'] >= threshold and u['user_info'].get('is_verified')]
-            
-            if not eligible:
-                await update.message.reply_text(f"لا يوجد مستخدمون موثقون لديهم {threshold} إحالة حقيقية أو أكثر.", reply_markup=get_admin_panel_keyboard())
-            else:
-                winner_data = random.choice(eligible)
-                winner_id = winner_data['user_info']['user_id']
-                mention = await get_user_mention(winner_id, context)
-                await update.message.reply_text(
-                    f"🎉 *الفائز هو*!!!\n\n"
-                    f"*المستخدم:* {mention}\n"
-                    f"*عدد الإحالات:* {winner_data['total_real']}\n\nتهانينا!",
-                    parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard()
-                )
-        except (ValueError, TypeError):
-            await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
-
-    elif state == State.AWAITING_BROADCAST_MESSAGE:
-        await update.message.reply_text("⏳ جاري بدء الإذاعة...")
-        all_users = await get_all_users_from_db()
-        verified_users_ids = [u['user_id'] for u in all_users if u.get('is_verified')]
-        sent, failed = 0, 0
-        
-        for user_id in verified_users_ids:
-            try:
-                await context.bot.send_message(chat_id=user_id, text=text, parse_mode=ParseMode.MARKDOWN)
-                sent += 1
-            except TelegramError: failed += 1
-            await asyncio.sleep(0.04) # 25 messages per second
-            
-        await update.message.reply_text(f"✅ اكتملت الإذاعة.\n- تم الإرسال إلى: {sent}\n- فشل الإرسال إلى: {failed}", reply_markup=get_admin_panel_keyboard())
-
-    elif state == State.AWAITING_CHECK_USER_ID:
-        try:
-            target_user_id = int(text)
-            await update.message.reply_text(f"⏳ جاري فحص ومزامنة المستخدم `{target_user_id}`...")
-            changes = await reconcile_single_user(target_user_id, context)
-            
-            accurate_counts = await get_accurate_referral_counts(context)
-            new_user_data = accurate_counts.get(target_user_id)
-            if new_user_data:
-                await update.message.reply_text(
-                    f"✅ اكتمل الفحص. تم إجراء *{changes}* تعديل في قاعدة البيانات.\n"
-                    f"البيانات الدقيقة للمستخدم: *{new_user_data.get('total_real',0)}* حقيقي, *{new_user_data.get('total_fake',0)}* وهمي.",
-                    parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard()
-                )
-            else:
-                await update.message.reply_text("لم يتم العثور على المستخدم.", reply_markup=get_admin_panel_keyboard())
-
-        except (ValueError, TypeError):
-            await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
+            await update.message.reply_text(Messages.INVALID_INPUT + "\nيرجى إدخال رقم صحيح فقط.")
+            # Do not clear state, so user can try again
+    
+    else:
+        # Handle other states or clear if unknown
+        context.user_data.pop('state', None)
 
 # --- معالج مغادرة الأعضاء (Chat Member Handler) ---
 async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
