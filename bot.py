@@ -116,21 +116,19 @@ def clean_name_for_markdown(name: str) -> str:
     if not name: return ""
     return re.sub(r"([*_`\[\]\(\)])", "", name)
 
-async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE, db_user_info: Optional[Dict[str, Any]] = None) -> str:
+async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
     try:
         chat = await context.bot.get_chat(user_id)
         full_name = clean_name_for_markdown(chat.full_name)
-        if db_user_info and (chat.full_name != db_user_info.get('full_name') or chat.username != db_user_info.get('username')):
-            context.job_queue.run_once(lambda _: upsert_user_in_db({'user_id': user_id, 'full_name': chat.full_name, 'username': chat.username}), 0)
         return f"[{full_name}](tg://user?id={user_id})"
-    except Exception as e:
-        logger.warning(f"Could not fetch fresh user data for {user_id} via get_chat: {e}. Falling back to DB.")
-        if not db_user_info:
-            db_user_info = await get_user_from_db(user_id)
+    except Exception:
+        # Fallback for users who can't be fetched
+        db_user_info = await get_user_from_db(user_id)
         if db_user_info:
             full_name = clean_name_for_markdown(db_user_info.get("full_name", f"User {user_id}"))
             return f"[{full_name}](tg://user?id={user_id})"
         return f"[User {user_id}](tg://user?id={user_id})"
+
 
 async def run_sync_db(func: Callable[[], Any]) -> Any:
     return await asyncio.to_thread(func)
@@ -256,7 +254,7 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
     if not top_5_users:
         text += "لم يصل أحد إلى القائمة بعد. كن أنت الأول!\n"
     else:
-        mentions = await asyncio.gather(*[get_user_mention(u['user_id'], context, u) for u in top_5_users])
+        mentions = await asyncio.gather(*[get_user_mention(u['user_id'], context) for u in top_5_users])
         for i, u_info in enumerate(top_5_users):
             mention = mentions[i]
             count = get_total_real_referrals(u_info)
@@ -291,7 +289,7 @@ async def get_paginated_report(all_users: List[Dict[str, Any]], page: int, repor
     title = "📊 *تقرير الإحالات الحقيقية*" if report_type == 'real' else "⏳ *تقرير الإحالات الوهمية*"
     report = f"{title} (صفحة {page} من {total_pages}):\n\n"
     
-    mentions = await asyncio.gather(*[get_user_mention(u['user_id'], context, u) for u in page_users])
+    mentions = await asyncio.gather(*[get_user_mention(u['user_id'], context) for u in page_users])
     
     for i, u_info in enumerate(page_users):
         mention = mentions[i]
@@ -718,7 +716,7 @@ async def handle_recheck_leavers(query: CallbackQuery, context: ContextTypes.DEF
     await query.edit_message_text(text="تم جدولة فحص المغادرين. ستبدأ العملية المحسّنة في الخلفية وستصلك رسالة عند الانتهاء.", reply_markup=get_admin_panel_keyboard())
 
 async def handle_user_edit_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await query.edit_message_text(text="� *تعديل المستخدم*\n\nاختر الإجراء المطلوب:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_user_edit_keyboard())
+    await query.edit_message_text(text="👤 *تعديل المستخدم*\n\nاختر الإجراء المطلوب:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_user_edit_keyboard())
 
 async def handle_user_edit_action(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['state'] = State.AWAITING_EDIT_USER_ID
@@ -796,7 +794,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 return
             
             list_type = "الحقيقية" if state == State.AWAITING_REAL_REFERRAL_LIST_USER_ID else "الوهمية"
-            mention = await get_user_mention(target_user_id, context, target_user)
+            mention = await get_user_mention(target_user_id, context)
             await update.message.reply_text(f"⏳ جارٍ جلب قائمة الإحالات *{list_type}* للمستخدم {mention}...", parse_mode=ParseMode.MARKDOWN)
 
             all_users = await get_all_users_from_db()
@@ -812,10 +810,9 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text(f"المستخدم {mention} ليس لديه أي إحالات {list_type}.", parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
                 return
             
-            user_map = {u['user_id']: u for u in all_users}
             response_text = f"✅ *قائمة الإحالات الـ{list_type} للمستخدم {mention} ({len(referral_ids)}):*\n\n"
             
-            mentions = await asyncio.gather(*[get_user_mention(ref_id, context, user_map.get(ref_id)) for ref_id in referral_ids])
+            mentions = await asyncio.gather(*[get_user_mention(ref_id, context) for ref_id in referral_ids])
             for user_mention in mentions:
                 response_text += f"• {user_mention}\n"
 
@@ -839,7 +836,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 Callback.USER_REMOVE_MANUAL.value: "خصم إحالات (يدوي)",
             }
             action_type = context.user_data.get('action_type')
-            mention = await get_user_mention(target_user_id, context, user_to_fix)
+            mention = await get_user_mention(target_user_id, context)
             prompt = (f"المستخدم: {mention}\n"
                       f"الإجراء: *{action_map.get(action_type, 'غير معروف')}*\n\n"
                       "الرجاء إرسال العدد الذي تريد تطبيقه.")
@@ -875,7 +872,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 await get_users_with_cache(context, force_refresh=True)
                 new_user_data = await get_user_from_db(target_user_id)
                 
-                mention = await get_user_mention(target_user_id, context, new_user_data)
+                mention = await get_user_mention(target_user_id, context)
                 final_text = (f"✅ تم التعديل بنجاح.\n\n"
                               f"المستخدم: {mention}\n"
                               f"الرصيد الجديد:\n"
@@ -896,7 +893,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text(f"لا يوجد مستخدمون موثقون لديهم {threshold} إحالة حقيقية أو أكثر.", reply_markup=get_admin_panel_keyboard())
             else:
                 winner = random.choice(eligible)
-                mention = await get_user_mention(winner['user_id'], context, winner)
+                mention = await get_user_mention(winner['user_id'], context)
                 await update.message.reply_text(
                     f"🎉 *الفائز هو*!!!\n\n"
                     f"*المستخدم:* {mention}\n"
