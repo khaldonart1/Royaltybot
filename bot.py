@@ -64,7 +64,8 @@ class State(Enum):
     AWAITING_CHECK_USER_ID = auto()
     AWAITING_EDIT_USER_ID = auto()
     AWAITING_EDIT_AMOUNT = auto()
-    AWAITING_REFERRAL_LIST_USER_ID = auto()
+    AWAITING_REAL_REFERRAL_LIST_USER_ID = auto()
+    AWAITING_FAKE_REFERRAL_LIST_USER_ID = auto()
 
 class Callback(Enum):
     MAIN_MENU = "main_menu"
@@ -84,11 +85,10 @@ class Callback(Enum):
     ADMIN_CHECK_ONE = "admin_check_one"
     ADMIN_RECHECK_LEAVERS = "admin_recheck_leavers"
     ADMIN_USER_EDIT_MENU = "admin_user_edit_menu"
-    USER_ADD_REAL = "user_add_real"
-    USER_REMOVE_REAL = "user_remove_real"
-    USER_ADD_FAKE = "user_add_fake"
-    USER_REMOVE_FAKE = "user_remove_fake"
-    ADMIN_GET_USER_REFERRALS = "admin_get_user_referrals"
+    USER_ADD_MANUAL = "user_add_manual"
+    USER_REMOVE_MANUAL = "user_remove_manual"
+    ADMIN_GET_REAL_REFERRALS_LIST = "admin_get_real_referrals"
+    ADMIN_GET_FAKE_REFERRALS_LIST = "admin_get_fake_referrals"
     REPORT_PAGE = "report_"
 
 class Messages:
@@ -123,7 +123,7 @@ async def run_sync_db(func: Callable[[], Any]) -> Any:
 async def get_user_from_db(user_id: int) -> Optional[Dict[str, Any]]:
     try:
         res = await run_sync_db(
-            lambda: supabase.table('users').select("user_id, full_name, real_referrals, fake_referrals, is_verified, manual_referrals").eq('user_id', user_id).single().execute()
+            lambda: supabase.table('users').select("user_id, full_name, username, real_referrals, fake_referrals, is_verified, manual_referrals").eq('user_id', user_id).single().execute()
         )
         return res.data
     except Exception:
@@ -146,7 +146,7 @@ async def get_all_users_from_db() -> List[Dict[str, Any]]:
     try:
         res = await run_sync_db(
             lambda: supabase.table('users').select(
-                "user_id, full_name, real_referrals, fake_referrals, is_verified, manual_referrals"
+                "user_id, full_name, username, real_referrals, fake_referrals, is_verified, manual_referrals"
             ).execute()
         )
         return res.data or []
@@ -215,14 +215,14 @@ async def get_users_with_cache(context: ContextTypes.DEFAULT_TYPE, force_refresh
     return cache.get('data', [])
 
 def get_total_real_referrals(user_info: Dict[str, Any]) -> int:
-    organic_real = user_info.get("real_referrals", 0) or 0
-    manual_real = user_info.get("manual_referrals", 0) or 0
+    organic_real = int(user_info.get("real_referrals", 0) or 0)
+    manual_real = int(user_info.get("manual_referrals", 0) or 0)
     return organic_real + manual_real
 
 def get_referral_stats_text(user_info: Optional[Dict[str, Any]]) -> str:
     if not user_info: return "لا توجد لديك بيانات بعد. حاول مرة أخرى."
     total_real = get_total_real_referrals(user_info)
-    fake = user_info.get("fake_referrals", 0) or 0
+    fake = int(user_info.get("fake_referrals", 0) or 0)
     return f"📊 *إحصائيات إحالاتك:*\n\n✅ الإحالات الحقيقية: *{total_real}*\n⏳ الإحالات الوهمية: *{fake}*"
 
 def get_referral_link_text(user_id: int, bot_username: str) -> str:
@@ -243,8 +243,10 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
     else:
         for i, u_info in enumerate(top_5_users):
             full_name = clean_name(u_info.get("full_name", f"User_{u_info.get('user_id')}"))
+            username = u_info.get("username")
+            display_name = f"{full_name} (@{username})" if username else full_name
             count = get_total_real_referrals(u_info)
-            text += f"{i+1}. {full_name} - *{count}* إحالة\n"
+            text += f"{i+1}. {display_name} - *{count}* إحالة\n"
     
     text += "\n---\n*ترتيبك الشخصي:*\n"
     try:
@@ -277,15 +279,17 @@ def get_paginated_report(all_users: List[Dict[str, Any]], page: int, report_type
     
     for u_info in page_users:
         full_name = clean_name(u_info.get('full_name', f"User_{u_info.get('user_id')}"))
+        username = u_info.get("username")
+        display_name = f"{full_name} (@{username})" if username else full_name
         user_id = u_info.get('user_id')
         
         count = 0
         if report_type == 'real':
             count = get_total_real_referrals(u_info)
         else:
-            count = u_info.get('fake_referrals', 0) or 0
+            count = int(u_info.get('fake_referrals', 0) or 0)
         
-        report += f"• {full_name} (`{user_id}`) - *{count}*\n"
+        report += f"• {display_name} (`{user_id}`) - *{count}*\n"
         
     nav_buttons = []
     callback_prefix = f"{Callback.REPORT_PAGE.value}{report_type}_page_"
@@ -304,7 +308,7 @@ def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏆 أفضل 5 متسابقين", callback_data=Callback.TOP_5.value)],
     ]
     if user_id in Config.BOT_OWNER_IDS:
-        keyboard.append([InlineKeyboardButton("👑 لوحة تحكم المالك 👑", callback_data=Callback.ADMIN_PANEL.value)])
+        keyboard.append([InlineKeyboardButton("👑 لوحة تحكم المالك �", callback_data=Callback.ADMIN_PANEL.value)])
     return InlineKeyboardMarkup(keyboard)
 
 def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
@@ -313,7 +317,10 @@ def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⏳ تقرير الإحالات الوهمية", callback_data=f"{Callback.REPORT_PAGE.value}fake_page_1")],
         [InlineKeyboardButton("👥 عدد مستخدمي البوت", callback_data=Callback.ADMIN_USER_COUNT.value)],
         [InlineKeyboardButton("🏆 اختيار فائز عشوائي", callback_data=Callback.PICK_WINNER.value)],
-        [InlineKeyboardButton("📜 عرض إحالات مستخدم", callback_data=Callback.ADMIN_GET_USER_REFERRALS.value)],
+        [
+            InlineKeyboardButton("📜 عرض حقيقي", callback_data=Callback.ADMIN_GET_REAL_REFERRALS_LIST.value),
+            InlineKeyboardButton("📜 عرض وهمي", callback_data=Callback.ADMIN_GET_FAKE_REFERRALS_LIST.value)
+        ],
         [InlineKeyboardButton("Checker 🔫", callback_data=Callback.ADMIN_CHECKER.value)],
         [InlineKeyboardButton("Booo 👾", callback_data=Callback.ADMIN_BOOO_MENU.value)],
         [InlineKeyboardButton("📢 إرسال رسالة للجميع", callback_data=Callback.ADMIN_BROADCAST.value)],
@@ -337,10 +344,8 @@ def get_booo_menu_keyboard() -> InlineKeyboardMarkup:
 
 def get_user_edit_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ زيادة إحالة حقيقية (يدوي)", callback_data=Callback.USER_ADD_REAL.value)],
-        [InlineKeyboardButton("➖ خصم إحالة حقيقية (يدوي)", callback_data=Callback.USER_REMOVE_REAL.value)],
-        [InlineKeyboardButton("➕ زيادة إحالة وهمية", callback_data=Callback.USER_ADD_FAKE.value)],
-        [InlineKeyboardButton("➖ خصم إحالة وهمية", callback_data=Callback.USER_REMOVE_FAKE.value)],
+        [InlineKeyboardButton("➕ زيادة إحالات (يدوي)", callback_data=Callback.USER_ADD_MANUAL.value)],
+        [InlineKeyboardButton("➖ خصم إحالات (يدوي)", callback_data=Callback.USER_REMOVE_MANUAL.value)],
         [InlineKeyboardButton("🔙 العودة لقائمة Booo", callback_data=Callback.ADMIN_BOOO_MENU.value)]
     ])
 
@@ -376,7 +381,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     user_id = user.id
     
-    user_data = { 'user_id': user_id, 'full_name': user.full_name }
+    user_data = { 
+        'user_id': user_id, 
+        'full_name': user.full_name,
+        'username': user.username
+    }
     await upsert_user_in_db(user_data)
     
     db_user = await get_user_from_db(user_id)
@@ -502,8 +511,8 @@ async def reconcile_single_user(user_id: int, context: ContextTypes.DEFAULT_TYPE
     calculated_real = sum(1 for link in user_referral_links if link['referred_user_id'] in verified_ids)
     calculated_fake = len(user_referral_links) - calculated_real
     
-    db_real = user_data.get('real_referrals', 0) or 0
-    db_fake = user_data.get('fake_referrals', 0) or 0
+    db_real = int(user_data.get('real_referrals', 0) or 0)
+    db_fake = int(user_data.get('fake_referrals', 0) or 0)
     
     changes_made = 0
     if calculated_real != db_real or calculated_fake != db_fake:
@@ -567,7 +576,7 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
         db_user = await get_user_from_db(user.id)
 
         if not db_user or not db_user.get('is_verified'):
-            await upsert_user_in_db({'user_id': user.id, 'is_verified': True, 'full_name': user.full_name})
+            await upsert_user_in_db({'user_id': user.id, 'is_verified': True, 'full_name': user.full_name, 'username': user.username})
             
             if 'referrer_id' in context.user_data:
                 referrer_id = context.user_data.pop('referrer_id')
@@ -575,8 +584,8 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
                     await add_referral_mapping(user.id, referrer_id)
                     referrer_db = await get_user_from_db(referrer_id)
                     if referrer_db:
-                        new_real = (referrer_db.get('real_referrals', 0) or 0) + 1
-                        new_fake = max(0, (referrer_db.get('fake_referrals', 0) or 0) - 1)
+                        new_real = (int(referrer_db.get('real_referrals', 0) or 0)) + 1
+                        new_fake = max(0, (int(referrer_db.get('fake_referrals', 0) or 0)) - 1)
                         await upsert_user_in_db({'user_id': referrer_id, 'real_referrals': new_real, 'fake_referrals': new_fake})
                         
                         await get_users_with_cache(context, force_refresh=True)
@@ -681,9 +690,13 @@ async def handle_admin_check_one(query: CallbackQuery, context: ContextTypes.DEF
     context.user_data['state'] = State.AWAITING_CHECK_USER_ID
     await query.edit_message_text(text="الرجاء إرسال الـ ID الرقمي للمستخدم الذي تريد فحص إحالاته.")
 
-async def handle_get_user_referrals_request(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data['state'] = State.AWAITING_REFERRAL_LIST_USER_ID
-    await query.edit_message_text(text="الرجاء إرسال الـ ID الرقمي للمستخدم الذي تريد عرض قائمة إحالاته الحقيقية.")
+async def handle_get_real_referrals_request(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data['state'] = State.AWAITING_REAL_REFERRAL_LIST_USER_ID
+    await query.edit_message_text(text="الرجاء إرسال الـ ID الرقمي للمستخدم الذي تريد عرض قائمة إحالاته *الحقيقية*.")
+
+async def handle_get_fake_referrals_request(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data['state'] = State.AWAITING_FAKE_REFERRAL_LIST_USER_ID
+    await query.edit_message_text(text="الرجاء إرسال الـ ID الرقمي للمستخدم الذي تريد عرض قائمة إحالاته *الوهمية*.")
 
 async def handle_booo_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(text="👾 *Booo*\n\nاختر الأداة التي تريد استخدامها:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_booo_menu_keyboard())
@@ -752,8 +765,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif query.data == Callback.ADMIN_BOOO_MENU.value: await handle_booo_menu(query, context)
     elif query.data == Callback.ADMIN_RECHECK_LEAVERS.value: await handle_recheck_leavers(query, context)
     elif query.data == Callback.ADMIN_USER_EDIT_MENU.value: await handle_user_edit_menu(query, context)
-    elif query.data == Callback.ADMIN_GET_USER_REFERRALS.value: await handle_get_user_referrals_request(query, context)
-    elif query.data in [c.value for c in [Callback.USER_ADD_REAL, Callback.USER_REMOVE_REAL, Callback.USER_ADD_FAKE, Callback.USER_REMOVE_FAKE]]: await handle_user_edit_action(query, context)
+    elif query.data == Callback.ADMIN_GET_REAL_REFERRALS_LIST.value: await handle_get_real_referrals_request(query, context)
+    elif query.data == Callback.ADMIN_GET_FAKE_REFERRALS_LIST.value: await handle_get_fake_referrals_request(query, context)
+    elif query.data in [c.value for c in [Callback.USER_ADD_MANUAL, Callback.USER_REMOVE_MANUAL]]: await handle_user_edit_action(query, context)
     elif query.data.startswith(Callback.REPORT_PAGE.value): await handle_report_pagination(query, context)
 
 async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -761,7 +775,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
     if not state or not update.message or not update.message.text: return
     text = update.message.text
 
-    if state == State.AWAITING_REFERRAL_LIST_USER_ID:
+    if state == State.AWAITING_REAL_REFERRAL_LIST_USER_ID or state == State.AWAITING_FAKE_REFERRAL_LIST_USER_ID:
         try:
             target_user_id = int(text)
             target_user = await get_user_from_db(target_user_id)
@@ -769,26 +783,32 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text("لم يتم العثور على مستخدم بهذا الـ ID.", reply_markup=get_admin_panel_keyboard())
                 return
             
-            await update.message.reply_text(f"⏳ جارٍ جلب قائمة الإحالات الحقيقية للمستخدم {clean_name(target_user.get('full_name'))}...")
+            list_type = "الحقيقية" if state == State.AWAITING_REAL_REFERRAL_LIST_USER_ID else "الوهمية"
+            await update.message.reply_text(f"⏳ جارٍ جلب قائمة الإحالات *{list_type}* للمستخدم {clean_name(target_user.get('full_name'))}...")
 
             all_users = await get_all_users_from_db()
             verified_user_ids = {u['user_id'] for u in all_users if u.get('is_verified')}
             user_referrals = await get_referrals_for_user(target_user_id)
-            real_referral_ids = [ref['referred_user_id'] for ref in user_referrals if ref['referred_user_id'] in verified_user_ids]
 
-            if not real_referral_ids:
-                await update.message.reply_text(f"المستخدم *{clean_name(target_user.get('full_name'))}* ليس لديه أي إحالات حقيقية.", parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
+            if state == State.AWAITING_REAL_REFERRAL_LIST_USER_ID:
+                referral_ids = [ref['referred_user_id'] for ref in user_referrals if ref['referred_user_id'] in verified_user_ids]
+            else: # FAKE
+                referral_ids = [ref['referred_user_id'] for ref in user_referrals if ref['referred_user_id'] not in verified_user_ids]
+
+            if not referral_ids:
+                await update.message.reply_text(f"المستخدم *{clean_name(target_user.get('full_name'))}* ليس لديه أي إحالات {list_type}.", parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
                 return
             
             user_map = {u['user_id']: u for u in all_users}
-            response_text = f"✅ *قائمة الإحالات الحقيقية للمستخدم {clean_name(target_user.get('full_name'))} ({len(real_referral_ids)}):*\n\n"
-            for ref_id in real_referral_ids:
+            response_text = f"✅ *قائمة الإحالات الـ{list_type} للمستخدم {clean_name(target_user.get('full_name'))} ({len(referral_ids)}):*\n\n"
+            for ref_id in referral_ids:
                 ref_user_info = user_map.get(ref_id)
                 full_name = clean_name(ref_user_info.get('full_name', 'اسم غير معروف')) if ref_user_info else "مستخدم محذوف"
-                response_text += f"- *الاسم:* {full_name}\n  - *ID:* `{ref_id}`\n"
+                username = ref_user_info.get('username') if ref_user_info else None
+                display_name = f"{full_name} (@{username})" if username else full_name
+                response_text += f"- *الاسم:* {display_name}\n  - *ID:* `{ref_id}`\n"
 
             await update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
-
         except (ValueError, TypeError):
             await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
 
@@ -804,10 +824,8 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             context.user_data['target_id'] = target_user_id
             
             action_map = {
-                Callback.USER_ADD_REAL.value: "إضافة إحالات حقيقية (يدوي)",
-                Callback.USER_REMOVE_REAL.value: "خصم إحالات حقيقية (يدوي)",
-                Callback.USER_ADD_FAKE.value: "إضافة إحالات وهمية",
-                Callback.USER_REMOVE_FAKE.value: "خصم إحالات وهمية"
+                Callback.USER_ADD_MANUAL.value: "زيادة إحالات (يدوي)",
+                Callback.USER_REMOVE_MANUAL.value: "خصم إحالات (يدوي)",
             }
             action_type = context.user_data.get('action_type')
             prompt = (f"المستخدم: *{clean_name(user_to_fix.get('full_name'))}* (`{target_user_id}`)\n"
@@ -833,23 +851,25 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if not user_to_fix: return
             
             update_data = {}
-            if action_type == Callback.USER_ADD_REAL.value:
-                current_manual = user_to_fix.get('manual_referrals', 0) or 0
+            current_manual = int(user_to_fix.get('manual_referrals', 0) or 0)
+            
+            if action_type == Callback.USER_ADD_MANUAL.value:
                 update_data = {'manual_referrals': current_manual + amount}
-            elif action_type == Callback.USER_REMOVE_REAL.value:
-                current_manual = user_to_fix.get('manual_referrals', 0) or 0
+            elif action_type == Callback.USER_REMOVE_MANUAL.value:
                 update_data = {'manual_referrals': max(0, current_manual - amount)}
-            elif action_type == Callback.USER_ADD_FAKE.value:
-                current_fake = user_to_fix.get('fake_referrals', 0) or 0
-                update_data = {'fake_referrals': current_fake + amount}
-            elif action_type == Callback.USER_REMOVE_FAKE.value:
-                current_fake = user_to_fix.get('fake_referrals', 0) or 0
-                update_data = {'fake_referrals': max(0, current_fake - amount)}
 
             if update_data:
                 await upsert_user_in_db({'user_id': target_user_id, **update_data})
                 await get_users_with_cache(context, force_refresh=True)
-                await update.message.reply_text(f"✅ تم بنجاح تعديل المستخدم *{clean_name(user_to_fix.get('full_name'))}*", parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
+                new_user_data = await get_user_from_db(target_user_id)
+                
+                final_text = (f"✅ تم التعديل بنجاح.\n\n"
+                              f"المستخدم: *{clean_name(new_user_data.get('full_name'))}*\n"
+                              f"الرصيد الجديد:\n"
+                              f"- *{get_total_real_referrals(new_user_data)}* إحالة حقيقية\n"
+                              f"- *{int(new_user_data.get('fake_referrals', 0) or 0)}* إحالة وهمية")
+
+                await update.message.reply_text(final_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
         except (ValueError, TypeError):
             await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
 
@@ -863,9 +883,11 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text(f"لا يوجد مستخدمون موثقون لديهم {threshold} إحالة حقيقية أو أكثر.", reply_markup=get_admin_panel_keyboard())
             else:
                 winner = random.choice(eligible)
+                winner_username = winner.get('username')
+                winner_display = f"(@{winner_username})" if winner_username else ""
                 await update.message.reply_text(
                     f"🎉 *الفائز هو*!!!\n\n"
-                    f"*الاسم:* {clean_name(winner.get('full_name'))}\n"
+                    f"*الاسم:* {clean_name(winner.get('full_name'))} {winner_display}\n"
                     f"*ID:* `{winner.get('user_id')}`\n"
                     f"*عدد الإحالات:* {get_total_real_referrals(winner)}\n\nتهانينا!",
                     parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard()
