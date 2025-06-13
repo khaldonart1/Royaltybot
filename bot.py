@@ -20,7 +20,6 @@ from telegram import (
 )
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
-from telegram.helpers import escape_markdown
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -114,8 +113,10 @@ except Exception as e:
     exit(1)
 
 def clean_name(name: str) -> str:
-    """Escapes characters that could conflict with Telegram's MarkdownV2."""
-    return escape_markdown(name, version=2)
+    """Removes characters that conflict with legacy Markdown."""
+    if not name:
+        return ""
+    return re.sub(r"([*_`\[])", "", name)
 
 async def run_sync_db(func: Callable[[], Any]) -> Any:
     return await asyncio.to_thread(func)
@@ -126,7 +127,7 @@ async def get_user_from_db(user_id: int) -> Optional[Dict[str, Any]]:
             lambda: supabase.table('users').select("user_id, full_name, real_referrals, fake_referrals, is_verified").eq('user_id', user_id).single().execute()
         )
         return res.data
-    except Exception as e:
+    except Exception:
         return None
 
 async def upsert_user_in_db(user_data: Dict[str, Any]) -> None:
@@ -239,14 +240,14 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
         for i, u_info in enumerate(top_5_users):
             full_name = clean_name(u_info.get("full_name", f"User_{u_info.get('user_id')}"))
             count = u_info.get("real_referrals", 0)
-            text += f"{i+1}\\. {full_name} \\- *{count}* إحالة\n"
+            text += f"{i+1}. {full_name} - *{count}* إحالة\n"
     
     text += "\n---\n*ترتيبك الشخصي:*\n"
     try:
         user_index = next((i for i, u in enumerate(full_sorted_list) if u.get('user_id') == user_id), -1)
         my_referrals = 0
         if user_index != -1:
-            rank_str = f"\\#{user_index + 1}"
+            rank_str = f"#{user_index + 1}"
             my_referrals = full_sorted_list[user_index].get("real_referrals", 0) or 0
         else:
             rank_str = "غير مصنف"
@@ -268,13 +269,13 @@ def get_paginated_report(all_users: List[Dict[str, Any]], page: int, report_type
     total_pages = math.ceil(len(all_users) / Config.USERS_PER_PAGE)
 
     title = "📊 *تقرير الإحالات الحقيقية*" if report_type == 'real' else "⏳ *تقرير الإحالات الوهمية*"
-    report = f"{title} \\(صفحة {page} من {total_pages}\\):\n\n"
+    report = f"{title} (صفحة {page} من {total_pages}):\n\n"
     
     for u_info in page_users:
         full_name = clean_name(u_info.get('full_name', f"User_{u_info.get('user_id')}"))
         user_id = u_info.get('user_id')
         count = u_info.get('real_referrals' if report_type == 'real' else 'fake_referrals', 0) or 0
-        report += f"• {full_name} \\(`{user_id}`\\) \\- *{count}*\n"
+        report += f"• {full_name} (`{user_id}`) - *{count}*\n"
         
     nav_buttons = []
     callback_prefix = f"{Callback.REPORT_PAGE.value}{report_type}_page_"
@@ -401,7 +402,10 @@ async def basic_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
         text = await func(user_id, context)
     else:
         user_info = await get_user_from_db(user_id)
-        text = func(user_info)
+        if func == get_referral_link_text:
+             text = func(user_id, context.bot.username)
+        else:
+             text = func(user_info)
 
     await update.message.reply_text(
         text, 
@@ -414,7 +418,7 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = update.effective_user.id
     msg = await update.message.reply_text(Messages.LOADING)
     text = await get_top_5_text(user_id, context)
-    await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_main_menu_keyboard(user_id))
+    await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu_keyboard(user_id))
 
 async def ask_math_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     question, answer = generate_math_question()
@@ -499,7 +503,7 @@ async def reconcile_single_user(user_id: int, context: ContextTypes.DEFAULT_TYPE
 
 async def reconcile_all_referrals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     owner_id = context.job.chat_id
-    await context.bot.send_message(owner_id, "⏳ *بدء الفحص الشامل المحسّن...*\nهذه العملية تعيد بناء كل الإحصائيات.", parse_mode=ParseMode.MARKDOWN_V2)
+    await context.bot.send_message(owner_id, "⏳ *بدء الفحص الشامل المحسّن...*\nهذه العملية تعيد بناء كل الإحصائيات.", parse_mode=ParseMode.MARKDOWN)
     
     all_users = await get_all_users_from_db()
     all_mappings = await get_all_referral_mappings()
@@ -538,10 +542,10 @@ async def reconcile_all_referrals_job(context: ContextTypes.DEFAULT_TYPE) -> Non
         await upsert_users_batch(users_to_update)
         
     await get_users_with_cache(context, force_refresh=True)
-    await context.bot.send_message(owner_id, f"✅ *اكتمل الفحص الشامل.*\nتم تصحيح بيانات *{len(users_to_update)}* مستخدم.", parse_mode=ParseMode.MARKDOWN_V2)
+    await context.bot.send_message(owner_id, f"✅ *اكتمل الفحص الشامل.*\nتم تصحيح بيانات *{len(users_to_update)}* مستخدم.", parse_mode=ParseMode.MARKDOWN)
 
 async def recheck_leavers_and_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    await context.bot.send_message(context.job.chat_id, "⏳ جاري بدء فحص شامل \\(للمغادرين وغيرهم\\)\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
+    await context.bot.send_message(context.job.chat_id, "⏳ جاري بدء فحص شامل (للمغادرين وغيرهم)...", parse_mode=ParseMode.MARKDOWN)
     await reconcile_all_referrals_job(context)
 
 async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -568,9 +572,9 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
                         cleaned_name = clean_name(user.full_name)
                         await context.bot.send_message(
                             chat_id=referrer_id,
-                            text=f"🎉 تهانينا\\! لقد انضم مستخدم جديد \\(*{cleaned_name}*\\) عن طريق رابطك\\.\n\n"
-                                 f"رصيدك الجديد هو: *{new_real}* إحالة حقيقية\\.",
-                            parse_mode=ParseMode.MARKDOWN_V2
+                            text=f"🎉 تهانينا! لقد انضم مستخدم جديد (*{cleaned_name}*) عن طريق رابطك.\n\n"
+                                 f"رصيدك الجديد هو: *{new_real}* إحالة حقيقية.",
+                            parse_mode=ParseMode.MARKDOWN
                         )
                 except TelegramError as e:
                     logger.warning(f"Could not send notification to referrer {referrer_id}: {e}")
@@ -596,8 +600,11 @@ async def handle_button_press(query: CallbackQuery, context: ContextTypes.DEFAUL
     if asyncio.iscoroutinefunction(func):
         text = await func(user_id, context)
     else:
-        user_info = await get_user_from_db(user_id)
-        text = func(user_info)
+        if func == get_referral_link_text:
+             text = func(user_id, context.bot.username)
+        else:
+             user_info = await get_user_from_db(user_id)
+             text = func(user_info)
 
     try:
         await query.edit_message_text(
@@ -611,7 +618,6 @@ async def handle_button_press(query: CallbackQuery, context: ContextTypes.DEFAUL
         else:
             logger.error(f"BadRequest on button press: {e}. Text: {text}")
             await query.answer("حدث خطأ في عرض البيانات.", show_alert=True)
-            # Fallback to a safe version
             await query.edit_message_text(Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(user_id))
     except Exception as e:
         logger.error(f"Unhandled error on button press: {e}")
@@ -624,7 +630,7 @@ async def handle_admin_user_count(query: CallbackQuery, context: ContextTypes.DE
     total = len(all_users)
     verified = sum(1 for u in all_users if u.get('is_verified'))
     text = f"📈 *إحصائيات مستخدمي البوت:*\n\n▫️ إجمالي المستخدمين: *{total}*\n✅ المستخدمون الموثقون: *{verified}*"
-    await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_admin_panel_keyboard())
+    await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
 
 async def handle_pick_winner(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['state'] = State.AWAITING_WINNER_THRESHOLD
@@ -637,7 +643,7 @@ async def handle_admin_broadcast(query: CallbackQuery, context: ContextTypes.DEF
 async def handle_admin_reset_all(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(
         text="⚠️ *تأكيد الإجراء* ⚠️\n\nهل أنت متأكد من أنك تريد تصفير *جميع* الإحالات؟ هذا الإجراء لا يمكن التراجع عنه.",
-        parse_mode=ParseMode.MARKDOWN_V2, 
+        parse_mode=ParseMode.MARKDOWN, 
         reply_markup=get_reset_confirmation_keyboard()
     )
 
@@ -650,10 +656,10 @@ async def handle_admin_reset_confirm(query: CallbackQuery, context: ContextTypes
 async def handle_admin_checker(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "🔫 *المدقق*\n\n"
-        "\\- *فحص شامل للكل*: يقوم بمراجعة *كل* الإحالات المسجلة وتصحيح الأرقام\\. *العملية محسّنة*\\.\n"
-        "\\- *فحص مستخدم محدد*: يقوم بنفس عملية الفحص ولكن لمستخدم واحد فقط\\."
+        "- *فحص شامل للكل*: يقوم بمراجعة *كل* الإحالات المسجلة وتصحيح الأرقام. *العملية محسّنة*.\n"
+        "- *فحص مستخدم محدد*: يقوم بنفس عملية الفحص ولكن لمستخدم واحد فقط."
     )
-    await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_checker_keyboard())
+    await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_checker_keyboard())
 
 async def handle_admin_check_all(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.job_queue.run_once(reconcile_all_referrals_job, 1, chat_id=query.from_user.id, name=f"reconcile_all_{query.from_user.id}")
@@ -668,14 +674,14 @@ async def handle_get_user_referrals_request(query: CallbackQuery, context: Conte
     await query.edit_message_text(text="الرجاء إرسال الـ ID الرقمي للمستخدم الذي تريد عرض قائمة إحالاته الحقيقية.")
 
 async def handle_booo_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await query.edit_message_text(text="👾 *Booo*\n\nاختر الأداة التي تريد استخدامها:", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_booo_menu_keyboard())
+    await query.edit_message_text(text="👾 *Booo*\n\nاختر الأداة التي تريد استخدامها:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_booo_menu_keyboard())
 
 async def handle_recheck_leavers(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.job_queue.run_once(recheck_leavers_and_notify_job, 1, chat_id=query.from_user.id, name=f"recheck_leavers_{query.from_user.id}")
     await query.edit_message_text(text="تم جدولة فحص المغادرين. ستبدأ العملية المحسّنة في الخلفية وستصلك رسالة عند الانتهاء.", reply_markup=get_admin_panel_keyboard())
 
 async def handle_user_edit_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await query.edit_message_text(text="👤 *تعديل المستخدم*\n\nاختر الإجراء المطلوب:", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_user_edit_keyboard())
+    await query.edit_message_text(text="👤 *تعديل المستخدم*\n\nاختر الإجراء المطلوب:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_user_edit_keyboard())
 
 async def handle_user_edit_action(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['state'] = State.AWAITING_EDIT_USER_ID
@@ -705,7 +711,7 @@ async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.D
         filtered_users.sort(key=lambda u: int(u.get(sort_key, 0) or 0), reverse=True)
 
         text, keyboard = get_paginated_report(filtered_users, page, report_type)
-        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
+        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
     except BadRequest as e:
         if "message is not modified" in str(e).lower():
             await query.answer()
@@ -720,9 +726,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     
     if query.data == Callback.MAIN_MENU.value: await query.edit_message_text(text=Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(query.from_user.id))
-    elif query.data == Callback.MY_REFERRALS.value: await handle_button_press(query, context, get_referral_stats_text, ParseMode.MARKDOWN_V2)
-    elif query.data == Callback.MY_LINK.value: await handle_button_press(query, context, lambda uid, ctx: get_referral_link_text(uid, ctx.bot.username), ParseMode.MARKDOWN_V2)
-    elif query.data == Callback.TOP_5.value: await handle_button_press(query, context, get_top_5_text, ParseMode.MARKDOWN_V2)
+    elif query.data == Callback.MY_REFERRALS.value: await handle_button_press(query, context, get_referral_stats_text, ParseMode.MARKDOWN)
+    elif query.data == Callback.MY_LINK.value: await handle_button_press(query, context, get_referral_link_text, ParseMode.MARKDOWN)
+    elif query.data == Callback.TOP_5.value: await handle_button_press(query, context, get_top_5_text, ParseMode.MARKDOWN)
     elif query.data == Callback.CONFIRM_JOIN.value: await handle_confirm_join(query, context)
     elif query.data == Callback.ADMIN_PANEL.value: await handle_admin_panel(query, context)
     elif query.data == Callback.ADMIN_USER_COUNT.value: await handle_admin_user_count(query, context)
@@ -761,7 +767,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             real_referral_ids = [ref['referred_user_id'] for ref in user_referrals if ref['referred_user_id'] in verified_user_ids]
 
             if not real_referral_ids:
-                await update.message.reply_text(f"المستخدم *{clean_name(target_user.get('full_name'))}* ليس لديه أي إحالات حقيقية.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_admin_panel_keyboard())
+                await update.message.reply_text(f"المستخدم *{clean_name(target_user.get('full_name'))}* ليس لديه أي إحالات حقيقية.", parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
                 return
             
             user_map = {u['user_id']: u for u in all_users}
@@ -769,9 +775,9 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             for ref_id in real_referral_ids:
                 ref_user_info = user_map.get(ref_id)
                 full_name = clean_name(ref_user_info.get('full_name', 'اسم غير معروف')) if ref_user_info else "مستخدم محذوف"
-                response_text += f"\\- *الاسم:* {full_name}\n  \\- *ID:* `{ref_id}`\n"
+                response_text += f"- *الاسم:* {full_name}\n  - *ID:* `{ref_id}`\n"
 
-            await update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_admin_panel_keyboard())
+            await update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
 
         except (ValueError, TypeError):
             await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
@@ -795,7 +801,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             prompt = (f"المستخدم: *{clean_name(user_to_fix.get('full_name'))}* (`{target_user_id}`)\n"
                       f"الإجراء: *{action_map.get(action_type, 'غير معروف')}*\n\n"
                       "الرجاء إرسال العدد الذي تريد تطبيقه.")
-            await update.message.reply_text(prompt, parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text(prompt, parse_mode=ParseMode.MARKDOWN)
         except (ValueError, TypeError):
             await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
 
@@ -824,7 +830,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if update_data:
                 await upsert_user_in_db({'user_id': target_user_id, **update_data})
                 await get_users_with_cache(context, force_refresh=True)
-                await update.message.reply_text(f"✅ تم بنجاح تعديل المستخدم *{clean_name(user_to_fix.get('full_name'))}*", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_admin_panel_keyboard())
+                await update.message.reply_text(f"✅ تم بنجاح تعديل المستخدم *{clean_name(user_to_fix.get('full_name'))}*", parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
         except (ValueError, TypeError):
             await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
 
@@ -839,11 +845,11 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             else:
                 winner = random.choice(eligible)
                 await update.message.reply_text(
-                    f"🎉 *الفائز هو*\\!\\!\\!\n\n"
+                    f"🎉 *الفائز هو*!!!\n\n"
                     f"*الاسم:* {clean_name(winner.get('full_name'))}\n"
                     f"*ID:* `{winner.get('user_id')}`\n"
-                    f"*عدد الإحالات:* {winner.get('real_referrals')}\n\nتهانينا\\!",
-                    parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_admin_panel_keyboard()
+                    f"*عدد الإحالات:* {winner.get('real_referrals')}\n\nتهانينا!",
+                    parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard()
                 )
         except (ValueError, TypeError):
             await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
@@ -856,7 +862,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
         
         for user_id in verified_users_ids:
             try:
-                await context.bot.send_message(chat_id=user_id, text=text)
+                await context.bot.send_message(chat_id=user_id, text=text, parse_mode=ParseMode.MARKDOWN)
                 sent += 1
             except TelegramError: failed += 1
             await asyncio.sleep(0.04)
@@ -874,7 +880,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text(
                     f"✅ اكتمل الفحص. تم إجراء *{changes}* تعديل.\n"
                     f"البيانات الجديدة للمستخدم: *{new_user_data.get('real_referrals', 0)}* حقيقي, *{new_user_data.get('fake_referrals',0)}* وهمي.",
-                    parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_admin_panel_keyboard()
+                    parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard()
                 )
         except (ValueError, TypeError):
             await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
@@ -903,9 +909,9 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
                     cleaned_name = clean_name(user.full_name)
                     await context.bot.send_message(
                         chat_id=referrer_id,
-                        text=f"⚠️ تنبيه\\! أحد المستخدمين الذين دعوتهم \\(*{cleaned_name}*\\) غادر\\.\n\n"
-                             f"تم تحديث رصيدك\\. رصيدك الحالي هو: *{new_real_count}* إحالة حقيقية\\.",
-                        parse_mode=ParseMode.MARKDOWN_V2
+                        text=f"⚠️ تنبيه! أحد المستخدمين الذين دعوتهم (*{cleaned_name}*) غادر.\n\n"
+                             f"تم تحديث رصيدك. رصيدك الحالي هو: *{new_real_count}* إحالة حقيقية.",
+                        parse_mode=ParseMode.MARKDOWN
                     )
                 except TelegramError as e:
                     logger.warning(f"Could not send leave notification to referrer {referrer_id}: {e}")
@@ -920,8 +926,8 @@ def main() -> None:
     application.add_handler(ChatMemberHandler(handle_chat_member_updates, ChatMemberHandler.CHAT_MEMBER), group=0)
     
     application.add_handler(CommandHandler("start", start_command), group=1)
-    application.add_handler(CommandHandler("invites", lambda u, c: basic_command_handler(u, c, get_referral_stats_text, ParseMode.MARKDOWN_V2)), group=1)
-    application.add_handler(CommandHandler("link", lambda u, c: basic_command_handler(u, c, lambda uid, ctx: get_referral_link_text(uid, ctx.bot.username), ParseMode.MARKDOWN_V2)), group=1)
+    application.add_handler(CommandHandler("invites", lambda u, c: basic_command_handler(u, c, get_referral_stats_text, ParseMode.MARKDOWN)), group=1)
+    application.add_handler(CommandHandler("link", lambda u, c: basic_command_handler(u, c, get_referral_link_text, ParseMode.MARKDOWN)), group=1)
     application.add_handler(CommandHandler("top", top_command), group=1)
     application.add_handler(CallbackQueryHandler(button_handler), group=1)
 
