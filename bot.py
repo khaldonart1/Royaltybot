@@ -90,8 +90,10 @@ class Callback(Enum):
     ADMIN_CHECK_ONE = "admin_check_one"
     ADMIN_RECHECK_LEAVERS = "admin_recheck_leavers"
     ADMIN_USER_EDIT_MENU = "admin_user_edit_menu"
-    USER_ADD_MANUAL = "user_add_manual"
-    USER_REMOVE_MANUAL = "user_remove_manual"
+    USER_ADD_REAL = "user_add_real"
+    USER_REMOVE_REAL = "user_remove_real"
+    USER_ADD_FAKE = "user_add_fake"
+    USER_REMOVE_FAKE = "user_remove_fake"
     ADMIN_GET_REAL_REFERRALS_LIST = "admin_get_real_referrals"
     ADMIN_GET_FAKE_REFERRALS_LIST = "admin_get_fake_referrals"
     REPORT_PAGE = "report_"
@@ -164,7 +166,7 @@ async def get_user_from_db(user_id: int) -> Optional[Dict[str, Any]]:
     """جلب مستخدم واحد من قاعدة البيانات"""
     try:
         res = await run_sync_db(
-            lambda: supabase.table('users').select("user_id, full_name, username, real_referrals, fake_referrals, is_verified, manual_referrals").eq('user_id', user_id).single().execute()
+            lambda: supabase.table('users').select("*, manual_fake_adjustment").eq('user_id', user_id).single().execute()
         )
         return res.data
     except Exception:
@@ -189,9 +191,7 @@ async def get_all_users_from_db() -> List[Dict[str, Any]]:
     """جلب كل المستخدمين من قاعدة البيانات"""
     try:
         res = await run_sync_db(
-            lambda: supabase.table('users').select(
-                "user_id, full_name, username, real_referrals, fake_referrals, is_verified, manual_referrals"
-            ).execute()
+            lambda: supabase.table('users').select("*, manual_fake_adjustment").execute()
         )
         return res.data or []
     except Exception as e:
@@ -244,17 +244,21 @@ async def add_referral_mapping(referred_id: int, referrer_id: int) -> None:
 async def reset_all_referrals_in_db() -> None:
     """تصفير كل الإحالات في قاعدة البيانات"""
     try:
-        # We only reset the referral mappings. The periodic job will fix the counts.
         await run_sync_db(lambda: supabase.table('referrals').delete().gt('referred_user_id', 0).execute())
-        # Also reset manual referrals
-        await run_sync_db(lambda: supabase.table('users').update({"manual_referrals": 0, "real_referrals": 0, "fake_referrals": 0}).gt('user_id', 0).execute())
+        update_payload = {
+            "manual_referrals": 0, 
+            "real_referrals": 0, 
+            "fake_referrals": 0,
+            "manual_fake_adjustment": 0
+        }
+        await run_sync_db(lambda: supabase.table('users').update(update_payload).gt('user_id', 0).execute())
         logger.info("All referrals have been reset in the database.")
     except Exception as e:
         logger.error(f"DB_ERROR: Resetting all referrals: {e}")
 
 # --- دوال العرض والمنطق الأساسي (Core Logic & Display Functions) ---
 
-async def get_accurate_referral_counts(context: ContextTypes.DEFAULT_TYPE) -> Dict[int, Dict[str, int]]:
+async def get_accurate_referral_counts(context: ContextTypes.DEFAULT_TYPE) -> Dict[int, Dict[str, Any]]:
     """
     **دالة جديدة ومحورية**
     تحسب عدد الإحالات الحقيقي والدقيق لكل مستخدم مباشرة من مصدر البيانات الأساسي.
@@ -272,12 +276,15 @@ async def get_accurate_referral_counts(context: ContextTypes.DEFAULT_TYPE) -> Di
     accurate_counts = {}
     for user in all_users:
         user_id = user['user_id']
-        manual_referrals = int(user.get('manual_referrals', 0) or 0)
+        manual_real = int(user.get('manual_referrals', 0) or 0)
+        manual_fake = int(user.get('manual_fake_adjustment', 0) or 0)
         accurate_counts[user_id] = {
             'organic_real': 0,
-            'fake': 0,
-            'manual': manual_referrals,
-            'total_real': manual_referrals,
+            'organic_fake': 0,
+            'manual_real': manual_real,
+            'manual_fake': manual_fake,
+            'total_real': manual_real,
+            'total_fake': 0, # Will be calculated later
             'user_info': user # Keep original user info
         }
 
@@ -290,23 +297,24 @@ async def get_accurate_referral_counts(context: ContextTypes.DEFAULT_TYPE) -> Di
             if referred_id in verified_ids:
                 accurate_counts[referrer_id]['organic_real'] += 1
             else:
-                accurate_counts[referrer_id]['fake'] += 1
+                accurate_counts[referrer_id]['organic_fake'] += 1
     
     # حساب المجموع النهائي
     for user_id, counts in accurate_counts.items():
-        counts['total_real'] = counts['organic_real'] + counts['manual']
+        counts['total_real'] = counts['organic_real'] + counts['manual_real']
+        counts['total_fake'] = max(0, counts['organic_fake'] + counts['manual_fake'])
         
     return accurate_counts
 
 
-def get_referral_stats_text(user_id: int, accurate_counts: Dict[int, Dict[str, int]]) -> str:
+def get_referral_stats_text(user_id: int, accurate_counts: Dict[int, Dict[str, Any]]) -> str:
     """توليد نص إحصائيات الإحالة للمستخدم"""
     user_stats = accurate_counts.get(user_id)
     if not user_stats: return "لا توجد لديك بيانات بعد. حاول مرة أخرى."
     
     total_real = user_stats.get("total_real", 0)
-    fake = user_stats.get("fake", 0)
-    return f"📊 *إحصائيات إحالاتك (دقيقة):*\n\n✅ الإحالات الحقيقية: *{total_real}*\n⏳ الإحالات الوهمية: *{fake}*"
+    total_fake = user_stats.get("total_fake", 0)
+    return f"📊 *إحصائيات إحالاتك (دقيقة):*\n\n✅ الإحالات الحقيقية: *{total_real}*\n⏳ الإحالات الوهمية: *{total_fake}*"
 
 def get_referral_link_text(user_id: int, bot_username: str) -> str:
     """توليد رابط الإحالة"""
@@ -370,8 +378,8 @@ async def get_paginated_report(page: int, report_type: str, context: ContextType
         filtered_users.sort(key=lambda u: u['total_real'], reverse=True)
         title = "📊 *تقرير الإحالات الحقيقية (محسوب بدقة)*"
     else: # fake
-        filtered_users = [u for u in all_users_data if u['fake'] > 0]
-        filtered_users.sort(key=lambda u: u['fake'], reverse=True)
+        filtered_users = [u for u in all_users_data if u['total_fake'] > 0]
+        filtered_users.sort(key=lambda u: u['total_fake'], reverse=True)
         title = "⏳ *تقرير الإحالات الوهمية (محسوب بدقة)*"
 
     if not filtered_users:
@@ -388,7 +396,7 @@ async def get_paginated_report(page: int, report_type: str, context: ContextType
     
     for i, u_data in enumerate(page_users):
         mention = mentions[i]
-        count = u_data['total_real'] if report_type == 'real' else u_data['fake']
+        count = u_data['total_real'] if report_type == 'real' else u_data['total_fake']
         report += f"• {mention} - *{count}*\n"
         
     nav_buttons = []
@@ -439,14 +447,16 @@ def get_checker_keyboard() -> InlineKeyboardMarkup:
 def get_booo_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 إعادة فحص المغادرين", callback_data=Callback.ADMIN_RECHECK_LEAVERS.value)],
-        [InlineKeyboardButton("✍️ تعديل إحالات مستخدم (يدوي)", callback_data=Callback.ADMIN_USER_EDIT_MENU.value)],
+        [InlineKeyboardButton("✍️ تعديل إحصائيات مستخدم", callback_data=Callback.ADMIN_USER_EDIT_MENU.value)],
         [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data=Callback.ADMIN_PANEL.value)]
     ])
 
 def get_user_edit_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ زيادة إحالات (يدوي)", callback_data=Callback.USER_ADD_MANUAL.value)],
-        [InlineKeyboardButton("➖ خصم إحالات (يدوي)", callback_data=Callback.USER_REMOVE_MANUAL.value)],
+        [InlineKeyboardButton("➕ إضافة إحالات حقيقية", callback_data=Callback.USER_ADD_REAL.value)],
+        [InlineKeyboardButton("➖ خصم إحالات حقيقية", callback_data=Callback.USER_REMOVE_REAL.value)],
+        [InlineKeyboardButton("➕ إضافة إحالات وهمية", callback_data=Callback.USER_ADD_FAKE.value)],
+        [InlineKeyboardButton("➖ خصم إحالات وهمية", callback_data=Callback.USER_REMOVE_FAKE.value)],
         [InlineKeyboardButton("🔙 العودة لقائمة Booo", callback_data=Callback.ADMIN_BOOO_MENU.value)]
     ])
 
@@ -483,35 +493,37 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     user = update.effective_user
     user_id = user.id
-    
-    user_data = { 
-        'user_id': user_id, 
-        'full_name': user.full_name,
-        'username': user.username,
-        'is_verified': False # Ensure is_verified is set initially
-    }
-    await upsert_user_in_db(user_data)
-    
+
+    # ** تم الإصلاح: تحقق أولاً قبل الكتابة في قاعدة البيانات **
+    # 1. Check if user is already verified
     db_user = await get_user_from_db(user_id)
-    
     if db_user and db_user.get("is_verified"):
         await update.message.reply_text(Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(user_id))
         return
 
+    # 2. Upsert user details (without is_verified) to keep them updated
+    user_data = {
+        'user_id': user_id,
+        'full_name': user.full_name,
+        'username': user.username
+    }
+    await upsert_user_in_db(user_data)
+
+    # 3. Handle referrer if present
     args = context.args
     if args:
         try:
             referrer_id = int(args[0])
             if referrer_id != user_id and not await get_referrer(user_id):
-                # Only add mapping if it doesn't exist
                 await add_referral_mapping(user_id, referrer_id)
                 logger.info(f"Referral link used: {user_id} was referred by {referrer_id}")
-                # We no longer increment fake referrals here, the reconciliation job will handle it
         except (ValueError, IndexError):
             pass # No valid referrer ID
             
+    # 4. Start verification flow for non-verified users
     await update.message.reply_text(Messages.START_WELCOME)
     await ask_math_question(update, context)
+
 
 async def my_referrals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message: return
@@ -611,7 +623,7 @@ async def reconcile_single_user(user_id: int, context: ContextTypes.DEFAULT_TYPE
     db_fake = int(user_info.get('fake_referrals', 0) or 0)
     
     calculated_real = user_counts['organic_real']
-    calculated_fake = user_counts['fake']
+    calculated_fake = user_counts['organic_fake']
 
     changes_made = 0
     if calculated_real != db_real or calculated_fake != db_fake:
@@ -638,9 +650,8 @@ async def reconcile_all_referrals_job(context: ContextTypes.DEFAULT_TYPE) -> Non
     for user_id, counts in accurate_counts.items():
         user_info = counts['user_info']
         calculated_real = counts['organic_real']
-        calculated_fake = counts['fake']
+        calculated_fake = counts['organic_fake']
         
-        # Check if the stored values in DB are different from calculated ones
         if (int(user_info.get('real_referrals') or 0) != calculated_real or 
             int(user_info.get('fake_referrals') or 0) != calculated_fake):
             users_to_update.append({
@@ -671,17 +682,16 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
         if not db_user or not db_user.get('is_verified'):
             await upsert_user_in_db({'user_id': user.id, 'is_verified': True, 'full_name': user.full_name, 'username': user.username})
             
-            # Find referrer and notify them
             referrer_id = await get_referrer(user.id)
             if referrer_id:
                 try:
-                    # Run a quick reconciliation for the referrer to get the new correct count
                     await reconcile_single_user(referrer_id, context)
-                    referrer_db = await get_user_from_db(referrer_id)
-                    if referrer_db:
-                        accurate_counts = await get_accurate_referral_counts(context)
-                        new_real_count = accurate_counts.get(referrer_id, {}).get('total_real', 0)
-                        
+                    
+                    accurate_counts = await get_accurate_referral_counts(context)
+                    new_referrer_data = accurate_counts.get(referrer_id)
+                    
+                    if new_referrer_data:
+                        new_real_count = new_referrer_data.get('total_real', 0)
                         mention = await get_user_mention(user.id, context)
                         await context.bot.send_message(
                             chat_id=referrer_id,
@@ -797,7 +807,7 @@ async def handle_recheck_leavers(query: CallbackQuery, context: ContextTypes.DEF
     await query.edit_message_text(text="تم جدولة فحص المغادرين. ستبدأ العملية في الخلفية وستصلك رسالة عند الانتهاء.", reply_markup=get_admin_panel_keyboard())
 
 async def handle_user_edit_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await query.edit_message_text(text="� *تعديل المستخدم*\n\nاختر الإجراء المطلوب:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_user_edit_keyboard())
+    await query.edit_message_text(text="👤 *تعديل إحصائيات المستخدم*\n\nاختر الإجراء المطلوب:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_user_edit_keyboard())
 
 async def handle_user_edit_action(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['state'] = State.AWAITING_EDIT_USER_ID
@@ -838,27 +848,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             raise
     
-    if query.data == Callback.MAIN_MENU.value: await query.edit_message_text(text=Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(query.from_user.id))
-    elif query.data == Callback.MY_REFERRALS.value: await handle_button_press_my_referrals(query, context)
-    elif query.data == Callback.MY_LINK.value: await handle_button_press_link(query, context)
-    elif query.data == Callback.TOP_5.value: await handle_button_press_top5(query, context)
-    elif query.data == Callback.CONFIRM_JOIN.value: await handle_confirm_join(query, context)
-    elif query.data == Callback.ADMIN_PANEL.value: await handle_admin_panel(query, context)
-    elif query.data == Callback.ADMIN_USER_COUNT.value: await handle_admin_user_count(query, context)
-    elif query.data == Callback.PICK_WINNER.value: await handle_pick_winner(query, context)
-    elif query.data == Callback.ADMIN_BROADCAST.value: await handle_admin_broadcast(query, context)
-    elif query.data == Callback.ADMIN_RESET_ALL.value: await handle_admin_reset_all(query, context)
-    elif query.data == Callback.ADMIN_RESET_CONFIRM.value: await handle_admin_reset_confirm(query, context)
-    elif query.data == Callback.ADMIN_CHECKER.value: await handle_admin_checker(query, context)
-    elif query.data == Callback.ADMIN_CHECK_ALL.value: await handle_admin_check_all(query, context)
-    elif query.data == Callback.ADMIN_CHECK_ONE.value: await handle_admin_check_one(query, context)
-    elif query.data == Callback.ADMIN_BOOO_MENU.value: await handle_booo_menu(query, context)
-    elif query.data == Callback.ADMIN_RECHECK_LEAVERS.value: await handle_recheck_leavers(query, context)
-    elif query.data == Callback.ADMIN_USER_EDIT_MENU.value: await handle_user_edit_menu(query, context)
-    elif query.data == Callback.ADMIN_GET_REAL_REFERRALS_LIST.value: await handle_get_real_referrals_request(query, context)
-    elif query.data == Callback.ADMIN_GET_FAKE_REFERRALS_LIST.value: await handle_get_fake_referrals_request(query, context)
-    elif query.data in [c.value for c in [Callback.USER_ADD_MANUAL, Callback.USER_REMOVE_MANUAL]]: await handle_user_edit_action(query, context)
-    elif query.data.startswith(Callback.REPORT_PAGE.value): await handle_report_pagination(query, context)
+    action = query.data
+    if action == Callback.MAIN_MENU.value: await query.edit_message_text(text=Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(query.from_user.id))
+    elif action == Callback.MY_REFERRALS.value: await handle_button_press_my_referrals(query, context)
+    elif action == Callback.MY_LINK.value: await handle_button_press_link(query, context)
+    elif action == Callback.TOP_5.value: await handle_button_press_top5(query, context)
+    elif action == Callback.CONFIRM_JOIN.value: await handle_confirm_join(query, context)
+    elif action == Callback.ADMIN_PANEL.value: await handle_admin_panel(query, context)
+    elif action == Callback.ADMIN_USER_COUNT.value: await handle_admin_user_count(query, context)
+    elif action == Callback.PICK_WINNER.value: await handle_pick_winner(query, context)
+    elif action == Callback.ADMIN_BROADCAST.value: await handle_admin_broadcast(query, context)
+    elif action == Callback.ADMIN_RESET_ALL.value: await handle_admin_reset_all(query, context)
+    elif action == Callback.ADMIN_RESET_CONFIRM.value: await handle_admin_reset_confirm(query, context)
+    elif action == Callback.ADMIN_CHECKER.value: await handle_admin_checker(query, context)
+    elif action == Callback.ADMIN_CHECK_ALL.value: await handle_admin_check_all(query, context)
+    elif action == Callback.ADMIN_CHECK_ONE.value: await handle_admin_check_one(query, context)
+    elif action == Callback.ADMIN_BOOO_MENU.value: await handle_booo_menu(query, context)
+    elif action == Callback.ADMIN_RECHECK_LEAVERS.value: await handle_recheck_leavers(query, context)
+    elif action == Callback.ADMIN_USER_EDIT_MENU.value: await handle_user_edit_menu(query, context)
+    elif action == Callback.ADMIN_GET_REAL_REFERRALS_LIST.value: await handle_get_real_referrals_request(query, context)
+    elif action == Callback.ADMIN_GET_FAKE_REFERRALS_LIST.value: await handle_get_fake_referrals_request(query, context)
+    elif action in [c.value for c in [Callback.USER_ADD_REAL, Callback.USER_REMOVE_REAL, Callback.USER_ADD_FAKE, Callback.USER_REMOVE_FAKE]]: await handle_user_edit_action(query, context)
+    elif action.startswith(Callback.REPORT_PAGE.value): await handle_report_pagination(query, context)
 
 # --- معالج رسائل المالك (Admin Message Handler) ---
 async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -897,7 +908,6 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             for user_mention in mentions:
                 response_text += f"• {user_mention}\n"
             
-            # Split message if too long
             for i in range(0, len(response_text), 4096):
                 await update.message.reply_text(response_text[i:i + 4096], parse_mode=ParseMode.MARKDOWN)
             
@@ -918,8 +928,10 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             context.user_data['target_id'] = target_user_id
             
             action_map = {
-                Callback.USER_ADD_MANUAL.value: "زيادة إحالات (يدوي)",
-                Callback.USER_REMOVE_MANUAL.value: "خصم إحالات (يدوي)",
+                Callback.USER_ADD_REAL.value: "زيادة إحالات حقيقية (يدوي)",
+                Callback.USER_REMOVE_REAL.value: "خصم إحالات حقيقية (يدوي)",
+                Callback.USER_ADD_FAKE.value: "زيادة إحالات وهمية (يدوي)",
+                Callback.USER_REMOVE_FAKE.value: "خصم إحالات وهمية (يدوي)",
             }
             action_type = context.user_data.get('action_type')
             mention = await get_user_mention(target_user_id, context)
@@ -946,18 +958,22 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if not user_to_fix: return
             
             update_data = {}
-            current_manual = int(user_to_fix.get('manual_referrals', 0) or 0)
+            current_manual_real = int(user_to_fix.get('manual_referrals', 0) or 0)
+            current_manual_fake = int(user_to_fix.get('manual_fake_adjustment', 0) or 0)
             
-            if action_type == Callback.USER_ADD_MANUAL.value:
-                update_data = {'manual_referrals': current_manual + amount}
-            elif action_type == Callback.USER_REMOVE_MANUAL.value:
-                update_data = {'manual_referrals': max(0, current_manual - amount)}
+            if action_type == Callback.USER_ADD_REAL.value:
+                update_data = {'manual_referrals': current_manual_real + amount}
+            elif action_type == Callback.USER_REMOVE_REAL.value:
+                update_data = {'manual_referrals': current_manual_real - amount}
+            elif action_type == Callback.USER_ADD_FAKE.value:
+                update_data = {'manual_fake_adjustment': current_manual_fake + amount}
+            elif action_type == Callback.USER_REMOVE_FAKE.value:
+                update_data = {'manual_fake_adjustment': current_manual_fake - amount}
 
             if update_data:
                 await upsert_user_in_db({'user_id': target_user_id, **update_data})
                 
                 mention = await get_user_mention(target_user_id, context)
-                # Get the new accurate counts
                 accurate_counts = await get_accurate_referral_counts(context)
                 new_user_data = accurate_counts.get(target_user_id)
 
@@ -965,8 +981,8 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                     final_text = (f"✅ تم التعديل بنجاح.\n\n"
                                   f"المستخدم: {mention}\n"
                                   f"الرصيد الجديد الدقيق:\n"
-                                  f"- *{new_user_data.get('total_real', 0)}* إحالة حقيقية\n"
-                                  f"- *{new_user_data.get('fake', 0)}* إحالة وهمية")
+                                  f"✅ *{new_user_data.get('total_real', 0)}* إحالة حقيقية\n"
+                                  f"⏳ *{new_user_data.get('total_fake', 0)}* إحالة وهمية")
                     await update.message.reply_text(final_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
         except (ValueError, TypeError):
             await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
@@ -1019,7 +1035,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             if new_user_data:
                 await update.message.reply_text(
                     f"✅ اكتمل الفحص. تم إجراء *{changes}* تعديل في قاعدة البيانات.\n"
-                    f"البيانات الدقيقة للمستخدم: *{new_user_data.get('total_real',0)}* حقيقي, *{new_user_data.get('fake',0)}* وهمي.",
+                    f"البيانات الدقيقة للمستخدم: *{new_user_data.get('total_real',0)}* حقيقي, *{new_user_data.get('total_fake',0)}* وهمي.",
                     parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard()
                 )
             else:
@@ -1043,23 +1059,22 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
         
         referrer_id = await get_referrer(user.id)
         if referrer_id:
-            # Reconcile the referrer to update their counts in the database
             changes = await reconcile_single_user(referrer_id, context)
             
             if changes > 0:
                 try:
-                    # Notify the referrer with their new accurate count
                     accurate_counts = await get_accurate_referral_counts(context)
                     new_referrer_data = accurate_counts.get(referrer_id)
-                    new_real_count = new_referrer_data.get('total_real', 'N/A') if new_referrer_data else 'N/A'
-
-                    mention = await get_user_mention(user.id, context)
-                    await context.bot.send_message(
-                        chat_id=referrer_id,
-                        text=f"⚠️ تنبيه! أحد المستخدمين الذين دعوتهم ({mention}) غادر.\n\n"
-                             f"تم تحديث رصيدك. رصيدك الحالي الدقيق هو: *{new_real_count}* إحالة حقيقية.",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
+                    
+                    if new_referrer_data:
+                        new_real_count = new_referrer_data.get('total_real', 'N/A')
+                        mention = await get_user_mention(user.id, context)
+                        await context.bot.send_message(
+                            chat_id=referrer_id,
+                            text=f"⚠️ تنبيه! أحد المستخدمين الذين دعوتهم ({mention}) غادر.\n\n"
+                                 f"تم تحديث رصيدك. رصيدك الحالي الدقيق هو: *{new_real_count}* إحالة حقيقية.",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
                 except TelegramError as e:
                     logger.warning(f"Could not send leave notification to referrer {referrer_id}: {e}")
 
