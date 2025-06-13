@@ -322,6 +322,7 @@ def get_paginated_report(all_users: List[Dict[str, Any]], page: int, report_type
         
     nav_buttons = []
     callback_prefix = f"{Callback.REPORT_PAGE.value}{report_type}_page_"
+    page = max(1, min(page, total_pages))
     if page > 1:
         nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"{callback_prefix}{page-1}"))
     if page < total_pages:
