@@ -57,7 +57,7 @@ class Config:
     }
     USERS_PER_PAGE = 15
     MENTION_CACHE_TTL_SECONDS = 300 # Cache for user mentions (5 minutes)
-    IPGEOLOCATION_API_KEY = "YOUR_IPGEOLOCATION_API_KEY" # Add your API key here
+    IPGEOLOCATION_API_KEY = "52991878eb5a4de1a373837d1c78339b" # Add your API key here
     MAX_REFERRALS_PER_IP = 2
 
 # --- حالات البوت (State) ---
