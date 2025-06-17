@@ -57,7 +57,7 @@ class Config:
     }
     USERS_PER_PAGE = 15
     MENTION_CACHE_TTL_SECONDS = 300 # Cache for user mentions (5 minutes)
-    IPGEOLOCATION_API_KEY = "52991878eb5a4de1a373837d1c78339b" # Add your API key here
+    IPGEOLOCATION_API_KEY = None # Add your api.ipgeolocation.io API key here
     MAX_REFERRALS_PER_IP = 2
 
 # --- حالات البوت (State) ---
@@ -143,6 +143,9 @@ async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
     return mention
 
 async def is_vpn(ip_address: str) -> bool:
+    if not Config.IPGEOLOCATION_API_KEY:
+        logger.warning("IPGEOLOCATION_API_KEY is not set. Skipping VPN check.")
+        return False
     try:
         response = requests.get(f"https://api.ipgeolocation.io/ipgeo?apiKey={Config.IPGEOLOCATION_API_KEY}&ip={ip_address}&fields=security")
         data = response.json()
@@ -198,12 +201,16 @@ async def get_referrer(referred_id: int) -> Optional[int]:
 
 async def add_referral_mapping(referred_id: int, referrer_id: int, ip_address: str) -> bool:
     try:
-        # Check for referral abuse
-        res = await run_sync_db(
-            lambda: supabase.table('referrals').select('ip_address').eq('ip_address', ip_address).execute()
-        )
-        if len(res.data) >= Config.MAX_REFERRALS_PER_IP:
-            return False
+        # Note: IP-based abuse detection requires a reliable way to get user IPs.
+        # The 'ip_address' parameter here must be valid for this check to work.
+        # If the IP is "UNKNOWN" or always the same, this check will fail.
+        if ip_address != "UNKNOWN":
+            res = await run_sync_db(
+                lambda: supabase.table('referrals').select('ip_address', count='exact').eq('ip_address', ip_address).execute()
+            )
+            if res.count >= Config.MAX_REFERRALS_PER_IP:
+                logger.warning(f"Referral abuse detected for IP {ip_address}. User {referred_id} blocked from referring {referrer_id}.")
+                return False
 
         data = {'referred_user_id': referred_id, 'referrer_user_id': referrer_id, 'ip_address': ip_address}
         await run_sync_db(lambda: supabase.table('referrals').upsert(data, on_conflict='referred_user_id').execute())
@@ -299,7 +306,7 @@ async def get_paginated_report(page: int, report_type: str, context: ContextType
     if report_type == 'real':
         filtered_users = [u for u in all_users if u.get('total_real', 0) > 0]
         filtered_users.sort(key=lambda u: u.get('total_real', 0), reverse=True)
-        title = "� *تقرير الإحالات الحقيقية*"
+        title = "✅ *تقرير الإحالات الحقيقية*"
         count_key = 'total_real'
     else: # fake
         filtered_users = [u for u in all_users if u.get('total_fake', 0) > 0]
@@ -406,12 +413,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     user_id = user.id
 
-    # VPN detection
-    if 'REMOTE_ADDR' in context.bot_data:
-        ip_address = context.bot_data['REMOTE_ADDR']
-        if await is_vpn(ip_address):
-            await update.message.reply_text(Messages.VPN_DETECTED)
-            return
+    # CRITICAL NOTE: Telegram bots cannot get user IPs directly.
+    # The 'REMOTE_ADDR' key used below is a placeholder and MUST be populated 
+    # by an external mechanism, such as a web app that the user opens.
+    # Without this, the IP will be "UNKNOWN", and all users will appear
+    # to have the same IP, which will incorrectly trigger the abuse detection.
+    # Example for a web app: you would pass the IP to bot_data when the user interacts.
+    # e.g., context.bot_data[f'ip_{user_id}'] = user_ip_from_webapp
+    ip_address = context.bot_data.get(f'ip_{user_id}', "UNKNOWN")
+
+    # VPN detection (only works if a real IP address is provided)
+    if ip_address != "UNKNOWN" and await is_vpn(ip_address):
+        await update.message.reply_text(Messages.VPN_DETECTED)
+        return
     
     db_user = await get_user_from_db(user_id)
     if db_user and db_user.get("is_verified"):
@@ -426,13 +440,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             referrer_id = int(args[0])
             if referrer_id != user_id and not await get_referrer(user_id):
-                ip_address = context.bot_data.get('REMOTE_ADDR', "UNKNOWN")
                 if not await add_referral_mapping(user_id, referrer_id, ip_address):
                     await update.message.reply_text(Messages.REFERRAL_ABUSE_DETECTED)
                     return
 
                 await modify_referral_count(user_id=referrer_id, fake_delta=1)
-                logger.info(f"Referral link used: {user_id} referred by {referrer_id}. Referrer fake count incremented.")
+                logger.info(f"Referral link used: {user_id} referred by {referrer_id}. IP: {ip_address}. Referrer fake count incremented.")
         except (ValueError, IndexError):
             pass
             
@@ -601,7 +614,7 @@ async def handle_admin_user_count(query: CallbackQuery) -> None:
     all_users = await get_all_users_from_db()
     total = len(all_users)
     verified = sum(1 for u in all_users if u.get('is_verified'))
-    text = f"📈 *إحصائيات مستخدمي البوت:*\n\n▫️ إجمالي المستخدمين: *{total}*\n✅ المستخدمون الموثقون: *{verified}*"
+    text = f"� *إحصائيات مستخدمي البوت:*\n\n▫️ إجمالي المستخدمين: *{total}*\n✅ المستخدمون الموثقون: *{verified}*"
     await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
 
 async def handle_admin_broadcast(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
