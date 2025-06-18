@@ -183,38 +183,6 @@ async def get_referrer(referred_id: int) -> Optional[int]:
     except Exception:
         return None
 
-async def add_referral_mapping(referred_id: int, referrer_id: int, device_id: str) -> bool:
-    """Checks only for device ID abuse and adds the referral mapping. [ULTRA-ROBUST]"""
-    try:
-        # Step 1: Fetch ALL existing device IDs from the database.
-        # This is less efficient but removes any doubt about the query.
-        # الخطوة 1: جلب كل بصمات الأجهزة الموجودة. هذه الطريقة أبطأ لكنها تضمن عدم وجود أي خطأ في الاستعلام.
-        all_referrals_res = await run_sync_db(
-            lambda: supabase.table('referrals').select("device_id").execute()
-        )
-        
-        # Extract the device IDs into a Python set for fast lookup.
-        # استخراج البصمات ووضعها في مجموعة (set) للبحث السريع.
-        existing_device_ids = {ref['device_id'] for ref in all_referrals_res.data if ref.get('device_id')}
-        
-        # Step 2: Check if the new device_id is in the set.
-        # الخطوة 2: التحقق إذا كانت بصمة الجهاز الجديد موجودة في القائمة.
-        if device_id in existing_device_ids:
-            logger.warning(f"Abuse detected: Device ID {device_id} already exists. Blocking user {referred_id}.")
-            return False
-
-        # Step 3: If the device ID is new, insert the record.
-        # الخطوة 3: إذا كانت البصمة جديدة، يتم تسجيل الإحالة.
-        data = {'referred_user_id': referred_id, 'referrer_user_id': referrer_id, 'device_id': device_id}
-        await run_sync_db(lambda: supabase.table('referrals').upsert(data, on_conflict='referred_user_id').execute())
-        
-        logger.info(f"Successfully mapped new device_id {device_id} to user {referred_id}.")
-        return True
-
-    except Exception as e:
-        logger.error(f"DB_ERROR during robust add_referral_mapping for {referred_id}: {e}", exc_info=True)
-        return False
-
 async def reset_all_referrals_in_db() -> None:
     try:
         await run_sync_db(lambda: supabase.table('referrals').delete().gt('referred_user_id', 0).execute())
@@ -265,7 +233,7 @@ def get_referral_stats_text(user_info: Optional[Dict[str, Any]]) -> str:
     if not user_info: return "لا توجد لديك بيانات بعد. حاول مرة أخرى."
     total_real = int(user_info.get("total_real", 0) or 0)
     total_fake = int(user_info.get("total_fake", 0) or 0)
-    return f"📊 *إحصائيات إحالاتك:*\n\n✅ الإحالات الحقيقية: *{total_real}*\n⏳ الإحالات الوهمية: *{total_fake}*"
+    return f"� *إحصائيات إحالاتك:*\n\n✅ الإحالات الحقيقية: *{total_real}*\n⏳ الإحالات الوهمية: *{total_fake}*"
 
 def get_referral_link_text(user_id: int, bot_username: str) -> str:
     return f"🔗 رابط الإحالة الخاص بك:\n`https://t.me/{bot_username}?start={user_id}`"
@@ -374,7 +342,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not db_user:
         await upsert_user_in_db({'user_id': user_id, 'full_name': user.full_name, 'username': user.username, 'total_real': 0, 'total_fake': 0, 'is_verified': False})
 
-    # NEW: Check if the user is already a member of the channel at the start
     context.user_data['was_already_member'] = await is_user_in_channel(user_id, context)
     if context.user_data['was_already_member']:
         logger.info(f"User {user_id} was already a member of the channel upon starting.")
@@ -388,7 +355,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except (ValueError, IndexError):
             pass
     
-    # Simplified flow: Go directly to web app verification
     await update.message.reply_text(Messages.START_WELCOME, reply_markup=ReplyKeyboardRemove())
     await ask_web_verification(update.message, context)
 
@@ -418,7 +384,6 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu_keyboard(user_id), disable_web_page_preview=True)
     
 async def ask_web_verification(message: Message, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a message with a Reply Keyboard button to open the web app."""
     keyboard = ReplyKeyboardMarkup.from_button(
         KeyboardButton(
             text="🔒 اضغط هنا للتحقق من جهازك",
@@ -445,15 +410,22 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(Messages.GENERIC_ERROR + " (لم يتم استلام بصمة الجهاز)", reply_markup=ReplyKeyboardRemove())
         return
 
-    logger.info(f"Received device_id {device_id} for user {user_id} from Web App.")
+    logger.info(f"Received device_id {device_id} for user {user_id}. Verifying uniqueness...")
 
     referrer_id = context.user_data.get('referrer_id')
-    if referrer_id and not await get_referrer(user_id):
+    
+    # Check if a referral record for this user already exists.
+    # This is to prevent re-processing if the user clicks the web app button multiple times.
+    if await get_referrer(user_id):
+        logger.warning(f"User {user_id} has already been processed for a referral. Skipping...")
+    else:
         is_allowed = await add_referral_mapping(user_id, referrer_id, device_id)
         
         if is_allowed:
-            await modify_referral_count(user_id=referrer_id, fake_delta=1)
-            logger.info(f"Referral mapping for {user_id} by {referrer_id} successful.")
+            # Only add a fake point if there was a referrer
+            if referrer_id:
+                await modify_referral_count(user_id=referrer_id, fake_delta=1)
+                logger.info(f"Referral mapping for {user_id} by {referrer_id} successful.")
         else:
             await update.message.reply_text(Messages.REFERRAL_ABUSE_DEVICE_USED, reply_markup=ReplyKeyboardRemove())
             return
@@ -498,10 +470,8 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
                 was_already_member = context.user_data.get('was_already_member', False)
                 try:
                     if was_already_member:
-                        # User was already in the channel, send notification but don't change points
                         await context.bot.send_message(chat_id=referrer_id, text=Messages.REFERRAL_EXISTING_MEMBER)
                     else:
-                        # This is a new, valid join. Convert fake point to real.
                         updated_referrer = await modify_referral_count(user_id=referrer_id, real_delta=1, fake_delta=-1)
                         if updated_referrer:
                             new_real_count = updated_referrer.get('total_real', 0)
@@ -553,7 +523,7 @@ async def handle_admin_user_count(query: CallbackQuery) -> None:
     all_users = await get_all_users_from_db()
     total = len(all_users)
     verified = sum(1 for u in all_users if u.get('is_verified'))
-    text = f"� *إحصائيات مستخدمي البوت:*\n\n▫️ إجمالي المستخدمين: *{total}*\n✅ المستخدمون الموثقون: *{verified}*"
+    text = f"📈 *إحصائيات مستخدمي البوت:*\n\n▫️ إجمالي المستخدمين: *{total}*\n✅ المستخدمون الموثقون: *{verified}*"
     await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
 
 async def handle_admin_broadcast(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -726,7 +696,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     state = context.user_data.get('state')
-    if not state or not update.message or not update.message.text: return
+    if not state or not update.message or (not update.message.text and not update.message.photo): return
     text = update.message.text
 
     if state == State.AWAITING_BROADCAST_MESSAGE:
@@ -889,7 +859,6 @@ def main() -> None:
     private_chat_filter = filters.ChatType.PRIVATE
     application.add_handler(MessageHandler(filters.CONTACT & private_chat_filter, handle_contact), group=2)
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler), group=2)
-    # This handler now only manages admin inputs, as the user verification flow no longer uses it.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_chat_filter, handle_admin_messages), group=2)
     
     logger.info("Bot is starting...")
