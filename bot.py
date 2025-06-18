@@ -186,12 +186,16 @@ async def get_referrer(referred_id: int) -> Optional[int]:
 async def add_referral_mapping(referred_id: int, referrer_id: int, device_id: str) -> bool:
     """Checks only for device ID abuse and adds the referral mapping."""
     try:
-        # Check if this device ID has already been used.
+        # Use count() for a more robust check of existing device IDs.
+        # استخدام count() للتحقق بشكل أكثر دقة من وجود بصمة الجهاز.
         device_check_res = await run_sync_db(
-            lambda: supabase.table('referrals').select("device_id").eq('device_id', device_id).limit(1).execute()
+            lambda: supabase.table('referrals').select('device_id', count='exact').eq('device_id', device_id).execute()
         )
-        if device_check_res.data:
-            logger.warning(f"Abuse detected: Device ID {device_id} has already been used. Blocking user {referred_id}.")
+        
+        # If the count is 1 or more, the device is already registered.
+        # إذا كان العدد 1 أو أكثر، فهذا يعني أن الجهاز مسجل بالفعل.
+        if device_check_res.count > 0:
+            logger.warning(f"Abuse detected: Device ID {device_id} has already been used. Count: {device_check_res.count}. Blocking user {referred_id}.")
             return False
 
         # If not found, add the new referral.
@@ -295,7 +299,7 @@ def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏆 أفضل 5 متسابقين", callback_data=Callback.TOP_5.value)],
     ]
     if user_id in Config.BOT_OWNER_IDS:
-        keyboard.append([InlineKeyboardButton("👑 لوحة تحكم المالك �", callback_data=Callback.ADMIN_PANEL.value)])
+        keyboard.append([InlineKeyboardButton("👑 لوحة تحكم المالك 👑", callback_data=Callback.ADMIN_PANEL.value)])
     return InlineKeyboardMarkup(keyboard)
 
 def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
@@ -876,7 +880,6 @@ def main() -> None:
     private_chat_filter = filters.ChatType.PRIVATE
     application.add_handler(MessageHandler(filters.CONTACT & private_chat_filter, handle_contact), group=2)
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler), group=2)
-    # This handler now only manages admin inputs, as the user verification flow no longer uses it.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_chat_filter, handle_admin_messages), group=2)
     
     logger.info("Bot is starting...")
