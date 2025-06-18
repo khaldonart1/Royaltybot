@@ -61,6 +61,7 @@ class Config:
     }
     USERS_PER_PAGE = 15
     MENTION_CACHE_TTL_SECONDS = 300
+    REFERRER_INVITE_LIMIT = 1
 
 # --- حالات البوت (State) ---
 class State(Enum):
@@ -108,7 +109,8 @@ class Messages:
     LOADING = "⏳ جاري التحميل..."
     ADMIN_WELCOME = "👑 أهلاً بك في لوحة تحكم المالك."
     INVALID_INPUT = "إدخال غير صالح. الرجاء المحاولة مرة أخرى."
-    REFERRAL_ABUSE_DETECTED = "تم اكتشاف إساءة استخدام لنظام الإحالة. تم حظر هذه الإحالة لأن هذا الجهاز تم استخدامه سابقاً للتسجيل."
+    REFERRAL_ABUSE_DEVICE_USED = "تم اكتشاف إساءة استخدام لنظام الإحالة. تم حظر هذه الإحالة لأن هذا الجهاز تم استخدامه سابقاً للتسجيل."
+    REFERRAL_ABUSE_REFERRER_LIMIT = "عذراً، لقد وصل الداعي إلى الحد الأقصى من الدعوات المسموح بها."
     MATH_CORRECT = "إجابة صحيحة! لننتقل للخطوة التالية."
 
 # --- الاتصال بقاعدة البيانات (Supabase) ---
@@ -183,22 +185,33 @@ async def get_referrer(referred_id: int) -> Optional[int]:
     except Exception:
         return None
 
-async def add_referral_mapping(referred_id: int, referrer_id: int, device_id: str) -> bool:
-    """Checks for device ID abuse and adds the referral mapping."""
+async def add_referral_mapping(referred_id: int, referrer_id: int, device_id: str) -> Tuple[bool, str]:
+    """Checks for device ID and referrer limit abuse, then adds the referral mapping."""
     try:
-        res = await run_sync_db(
-            lambda: supabase.table('referrals').select('device_id', count='exact').eq('device_id', device_id).execute()
+        # Check 1: Has this device already been used?
+        device_check_res = await run_sync_db(
+            lambda: supabase.table('referrals').select("device_id").eq('device_id', device_id).limit(1).execute()
         )
-        if res.count > 0:
-            logger.warning(f"Referral abuse detected for device_id {device_id}. User {referred_id} blocked from referring {referrer_id}.")
-            return False
+        if device_check_res.data:
+            logger.warning(f"Abuse detected: Device ID {device_id} has already been used. Blocking user {referred_id}.")
+            return False, "DEVICE_USED"
 
+        # Check 2: Has the referrer reached their invitation limit?
+        referrer_check_res = await run_sync_db(
+            lambda: supabase.table('referrals').select('referrer_user_id', count='exact').eq('referrer_user_id', referrer_id).execute()
+        )
+        if referrer_check_res.count >= Config.REFERRER_INVITE_LIMIT:
+            logger.warning(f"Abuse detected: Referrer {referrer_id} has reached their limit of {Config.REFERRER_INVITE_LIMIT}. Blocking for new user {referred_id}.")
+            return False, "REFERRER_LIMIT"
+
+        # All checks passed, add the new referral.
         data = {'referred_user_id': referred_id, 'referrer_user_id': referrer_id, 'device_id': device_id}
         await run_sync_db(lambda: supabase.table('referrals').upsert(data, on_conflict='referred_user_id').execute())
-        return True
+        return True, "SUCCESS"
+
     except Exception as e:
-        logger.error(f"DB_ERROR: Adding referral map for {referred_id} by {referrer_id} with device ID {device_id}: {e}")
-        return False
+        logger.error(f"DB_ERROR: Adding referral map for {referred_id}: {e}")
+        return False, "DB_ERROR"
 
 async def reset_all_referrals_in_db() -> None:
     try:
@@ -299,7 +312,7 @@ def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
 def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 تقرير حقيقي", callback_data=f"{Callback.REPORT_PAGE.value}real_page_1"), InlineKeyboardButton("⏳ تقرير وهمي", callback_data=f"{Callback.REPORT_PAGE.value}fake_page_1")],
-        [InlineKeyboardButton("👥 عدد المستخدمين", callback_data=Callback.ADMIN_USER_COUNT.value), InlineKeyboardButton("🏆 اختيار فائز", callback_data=Callback.PICK_WINNER.value)],
+        [InlineKeyboardButton("👥 عدد المستخدمين", callback_data=Callback.ADMIN_USER_COUNT.value)],
         [InlineKeyboardButton("Booo 👾 (تعديل يدوي)", callback_data=Callback.ADMIN_BOOO_MENU.value)],
         [InlineKeyboardButton("📢 إذاعة للموثقين", callback_data=Callback.ADMIN_BROADCAST.value)],
         [InlineKeyboardButton("📢 إذاعة للكل", callback_data=Callback.ADMIN_UNIVERSAL_BROADCAST.value)],
@@ -464,11 +477,20 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     referrer_id = context.user_data.get('referrer_id')
     if referrer_id and not await get_referrer(user_id):
-        if await add_referral_mapping(user_id, referrer_id, device_id):
+        is_allowed, reason_key = await add_referral_mapping(user_id, referrer_id, device_id)
+        
+        if is_allowed:
             await modify_referral_count(user_id=referrer_id, fake_delta=1)
             logger.info(f"Referral mapping for {user_id} by {referrer_id} successful with device_id {device_id}.")
         else:
-            await update.message.reply_text(Messages.REFERRAL_ABUSE_DETECTED, reply_markup=ReplyKeyboardRemove())
+            if reason_key == "DEVICE_USED":
+                abuse_message = Messages.REFERRAL_ABUSE_DEVICE_USED
+            elif reason_key == "REFERRER_LIMIT":
+                abuse_message = Messages.REFERRAL_ABUSE_REFERRER_LIMIT
+            else:
+                abuse_message = Messages.GENERIC_ERROR
+            
+            await update.message.reply_text(abuse_message, reply_markup=ReplyKeyboardRemove())
             return
 
     phone_button = [[KeyboardButton("اضغط هنا لمشاركة رقم هاتفك", request_contact=True)]]
