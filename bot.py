@@ -50,7 +50,6 @@ class Config:
     BOT_TOKEN = "7950170561:AAH5OtiK38BBhAnVofqxnLWRYbaZaIaKY4s"
     SUPABASE_URL = "https://jofxsqsgarvzolgphqjg.supabase.co"
     SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
-    # !!! هام: يجب وضع الرابط العام من PythonAnywhere هنا !!!
     WEB_APP_URL = "https://khaldonart.pythonanywhere.com" 
     CHANNEL_ID = -1002686156311
     CHANNEL_URL = "https://t.me/Ry_Hub"
@@ -61,19 +60,15 @@ class Config:
         "963", "216", "971", "967"
     }
     USERS_PER_PAGE = 15
-    MENTION_CACHE_TTL_SECONDS = 300 # Cache for user mentions (5 minutes)
-    IPGEOLOCATION_API_KEY = None # أضف مفتاح API الخاص بك من api.ipgeolocation.io هنا إذا كنت تريد فحص VPN
-    MAX_REFERRALS_PER_IP = 2
+    MENTION_CACHE_TTL_SECONDS = 300
 
 # --- حالات البوت (State) ---
 class State(Enum):
     AWAITING_EDIT_USER_ID = auto()
     AWAITING_EDIT_AMOUNT = auto()
-    AWAITING_WINNER_THRESHOLD = auto()
     AWAITING_BROADCAST_MESSAGE = auto()
     AWAITING_WEB_APP_VERIFICATION = auto()
     AWAITING_UNIVERSAL_BROADCAST_MESSAGE = auto()
-
 
 # --- تعريفات أزرار الكيبورد (Callback) ---
 class Callback(Enum):
@@ -113,8 +108,7 @@ class Messages:
     LOADING = "⏳ جاري التحميل..."
     ADMIN_WELCOME = "👑 أهلاً بك في لوحة تحكم المالك."
     INVALID_INPUT = "إدخال غير صالح. الرجاء المحاولة مرة أخرى."
-    VPN_DETECTED = "تم اكتشاف استخدامك لـ VPN. يرجى تعطيله والمحاولة مرة أخرى."
-    REFERRAL_ABUSE_DETECTED = "تم اكتشاف إساءة استخدام لنظام الإحالة. تم حظر هذه الإحالة لأن الجهاز تم استخدامه سابقاً."
+    REFERRAL_ABUSE_DETECTED = "تم اكتشاف إساءة استخدام لنظام الإحالة. تم حظر هذه الإحالة لأن هذا الجهاز تم استخدامه سابقاً للتسجيل."
     MATH_CORRECT = "إجابة صحيحة! لننتقل للخطوة التالية."
 
 # --- الاتصال بقاعدة البيانات (Supabase) ---
@@ -150,17 +144,6 @@ async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
         mention = f"[{full_name}](tg://user?id={user_id})"
         cache[user_id] = {'mention': mention, 'timestamp': current_time}
     return mention
-
-async def is_vpn(ip_address: str) -> bool:
-    if not Config.IPGEOLOCATION_API_KEY:
-        return False
-    try:
-        response = requests.get(f"https://api.ipgeolocation.io/ipgeo?apiKey={Config.IPGEOLOCATION_API_KEY}&ip={ip_address}&fields=security")
-        data = response.json()
-        return data.get("security", {}).get("is_vpn", False)
-    except Exception as e:
-        logger.error(f"VPN check failed for IP {ip_address}: {e}")
-        return False
 
 # --- دوال التعامل مع قاعدة البيانات (Database Functions) ---
 async def run_sync_db(func: Callable[[], Any]) -> Any:
@@ -200,21 +183,21 @@ async def get_referrer(referred_id: int) -> Optional[int]:
     except Exception:
         return None
 
-async def add_referral_mapping(referred_id: int, referrer_id: int, ip_address: str) -> bool:
+async def add_referral_mapping(referred_id: int, referrer_id: int, device_id: str) -> bool:
+    """Checks for device ID abuse and adds the referral mapping."""
     try:
-        if ip_address != "UNKNOWN":
-            res = await run_sync_db(
-                lambda: supabase.table('referrals').select('ip_address', count='exact').eq('ip_address', ip_address).execute()
-            )
-            if res.count >= Config.MAX_REFERRALS_PER_IP:
-                logger.warning(f"Referral abuse detected for IP {ip_address}. User {referred_id} blocked from referring {referrer_id}.")
-                return False
+        res = await run_sync_db(
+            lambda: supabase.table('referrals').select('device_id', count='exact').eq('device_id', device_id).execute()
+        )
+        if res.count > 0:
+            logger.warning(f"Referral abuse detected for device_id {device_id}. User {referred_id} blocked from referring {referrer_id}.")
+            return False
 
-        data = {'referred_user_id': referred_id, 'referrer_user_id': referrer_id, 'ip_address': ip_address}
+        data = {'referred_user_id': referred_id, 'referrer_user_id': referrer_id, 'device_id': device_id}
         await run_sync_db(lambda: supabase.table('referrals').upsert(data, on_conflict='referred_user_id').execute())
         return True
     except Exception as e:
-        logger.error(f"DB_ERROR: Adding referral map for {referred_id} by {referrer_id}: {e}")
+        logger.error(f"DB_ERROR: Adding referral map for {referred_id} by {referrer_id} with device ID {device_id}: {e}")
         return False
 
 async def reset_all_referrals_in_db() -> None:
@@ -465,33 +448,28 @@ async def handle_verification_text(update: Update, context: ContextTypes.DEFAULT
             await update.message.reply_text("من فضلك أدخل رقماً صحيحاً كإجابة.")
 
 async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles data sent from the web app."""
+    """Handles data sent from the web app using a device ID."""
     if not update.effective_user or not update.message or not update.message.web_app_data:
         return
         
     user_id = update.effective_user.id
     data = json.loads(update.message.web_app_data.data)
-    ip_address = data.get("ip")
+    device_id = data.get("device_id")
 
-    if not ip_address:
-        await update.message.reply_text(Messages.GENERIC_ERROR + " (لم يتم استلام IP)", reply_markup=ReplyKeyboardRemove())
+    if not device_id:
+        await update.message.reply_text(Messages.GENERIC_ERROR + " (لم يتم استلام بصمة الجهاز)", reply_markup=ReplyKeyboardRemove())
         return
 
-    context.bot_data[f'ip_{user_id}'] = ip_address
-    logger.info(f"Received IP {ip_address} for user {user_id} from Web App.")
+    logger.info(f"Received device_id {device_id} for user {user_id} from Web App.")
 
     referrer_id = context.user_data.get('referrer_id')
     if referrer_id and not await get_referrer(user_id):
-        if await add_referral_mapping(user_id, referrer_id, ip_address):
+        if await add_referral_mapping(user_id, referrer_id, device_id):
             await modify_referral_count(user_id=referrer_id, fake_delta=1)
-            logger.info(f"Referral mapping for {user_id} by {referrer_id} successful with IP {ip_address}.")
+            logger.info(f"Referral mapping for {user_id} by {referrer_id} successful with device_id {device_id}.")
         else:
             await update.message.reply_text(Messages.REFERRAL_ABUSE_DETECTED, reply_markup=ReplyKeyboardRemove())
             return
-
-    if await is_vpn(ip_address):
-        await update.message.reply_text(Messages.VPN_DETECTED, reply_markup=ReplyKeyboardRemove())
-        return
 
     phone_button = [[KeyboardButton("اضغط هنا لمشاركة رقم هاتفك", request_contact=True)]]
     await update.message.reply_text(

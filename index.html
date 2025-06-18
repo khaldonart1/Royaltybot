@@ -86,42 +86,37 @@
         const verifyButton = document.getElementById('verifyButton');
         const statusElement = document.getElementById('status');
         
+        // Function to generate a unique ID
+        function generateUUID() {
+            if (window.crypto && window.crypto.randomUUID) {
+                return window.crypto.randomUUID();
+            }
+            // Fallback for older browsers
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
         // Initialize the Web App
         tg.ready();
         
-        // When the verify button is clicked
         verifyButton.addEventListener('click', () => {
             statusElement.textContent = 'جاري التحقق...';
             verifyButton.disabled = true;
 
-            // Use a free API to get the user's public IP address
-            fetch('https://api.ipify.org?format=json')
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error('فشل الاتصال بالشبكة');
-                    }
-                    return response.json();
-                })
-                .then(data => {
-                    const ip = data.ip;
-                    if (ip) {
-                        statusElement.textContent = 'تم التحقق بنجاح!';
-                        // Send the IP address back to the bot
-                        tg.sendData(JSON.stringify({ ip: ip }));
-                        // *** THE FIX: Close the web app after sending data ***
-                        tg.close();
-                    } else {
-                        throw new Error('لم يتمكن من الحصول على عنوان IP.');
-                    }
-                })
-                .catch(error => {
-                    console.error('Error fetching IP:', error);
-                    statusElement.textContent = 'حدث خطأ. يرجى المحاولة مرة أخرى.';
-                    // Send an error message back to the bot
-                    tg.sendData(JSON.stringify({ error: 'Failed to get IP', details: error.message }));
-                    // Close the app even if there is an error
-                    tg.close();
-                });
+            // Get or create the unique device ID
+            let deviceId = localStorage.getItem('uniqueUserDeviceID');
+            if (!deviceId) {
+                deviceId = generateUUID();
+                localStorage.setItem('uniqueUserDeviceID', deviceId);
+            }
+
+            // Send the device ID back to the bot. IP is no longer needed for this check.
+            tg.sendData(JSON.stringify({ device_id: deviceId }));
+            
+            // Close the web app immediately
+            tg.close();
         });
     </script>
 
