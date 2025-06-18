@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>التحقق من الجهاز</title>
+    <!-- Telegram Web App script -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
+
+        body {
+            font-family: 'Cairo', sans-serif;
+            background-color: var(--tg-theme-bg-color, #f4f4f4);
+            color: var(--tg-theme-text-color, #222222);
+            text-align: center;
+            padding: 20px;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+
+        .container {
+            background-color: var(--tg-theme-secondary-bg-color, #ffffff);
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            color: var(--tg-theme-text-color, #111111);
+            font-size: 24px;
+            margin-bottom: 15px;
+        }
+
+        p {
+            font-size: 16px;
+            margin-bottom: 25px;
+            line-height: 1.5;
+        }
+
+        button {
+            font-family: 'Cairo', sans-serif;
+            background-color: var(--tg-theme-button-color, #007bff);
+            color: var(--tg-theme-button-text-color, #ffffff);
+            border: none;
+            padding: 15px 30px;
+            font-size: 18px;
+            font-weight: 700;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.3s, transform 0.2s;
+        }
+
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        button:not(:disabled):hover {
+            background-color: #0056b3;
+            transform: translateY(-2px);
+        }
+        
+        #status {
+            margin-top: 20px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>التحقق من الجهاز</h1>
+        <p>لمنع إساءة استخدام نظام الدعوات، نحتاج للتأكد من جهازك. يرجى الضغط على الزر أدناه للمتابعة.</p>
+        <button id="verifyButton">اضغط هنا للتحقق</button>
+        <p id="status"></p>
+    </div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        const verifyButton = document.getElementById('verifyButton');
+        const statusElement = document.getElementById('status');
+        
+        // Initialize the Web App
+        tg.ready();
+        
+        // When the verify button is clicked
+        verifyButton.addEventListener('click', () => {
+            statusElement.textContent = 'جاري التحقق...';
+            verifyButton.disabled = true;
+
+            // Use a free API to get the user's public IP address
+            fetch('https://api.ipify.org?format=json')
+                .then(response => response.json())
+                .then(data => {
+                    const ip = data.ip;
+                    if (ip) {
+                        statusElement.textContent = 'تم التحقق بنجاح!';
+                        // Send the IP address back to the bot
+                        tg.sendData(JSON.stringify({ ip: ip }));
+                        // The app will close automatically after sending data
+                    } else {
+                        throw new Error('لم يتمكن من الحصول على عنوان IP.');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching IP:', error);
+                    statusElement.textContent = 'حدث خطأ. يرجى المحاولة مرة أخرى.';
+                    tg.sendData(JSON.stringify({ error: 'Failed to get IP' }));
+                });
+        });
+    </script>
+
+</body>
+</html>

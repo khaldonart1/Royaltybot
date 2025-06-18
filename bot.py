@@ -5,6 +5,7 @@ import random
 import re
 import time
 import requests
+import json
 from enum import Enum, auto
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -15,9 +16,11 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     Update,
+    WebAppInfo,
+    ReplyKeyboardRemove,
+    ReplyKeyboardMarkup,  # <-- تمت إضافته هنا
+    Message               # <-- وتمت إضافة هذا
 )
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
@@ -47,6 +50,8 @@ class Config:
     BOT_TOKEN = "7950170561:AAH5OtiK38BBhAnVofqxnLWRYbaZaIaKY4s"
     SUPABASE_URL = "https://jofxsqsgarvzolgphqjg.supabase.co"
     SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
+    # !!! هام: يجب تغيير هذا الرابط لاحقاً إلى الرابط العام من PythonAnywhere !!!
+    WEB_APP_URL = "https://your-username.pythonanywhere.com" 
     CHANNEL_ID = -1002686156311
     CHANNEL_URL = "https://t.me/Ry_Hub"
     BOT_OWNER_IDS = {596472053, 7164133014, 1971453570}
@@ -57,7 +62,7 @@ class Config:
     }
     USERS_PER_PAGE = 15
     MENTION_CACHE_TTL_SECONDS = 300 # Cache for user mentions (5 minutes)
-    IPGEOLOCATION_API_KEY = None # Add your api.ipgeolocation.io API key here
+    IPGEOLOCATION_API_KEY = None # أضف مفتاح API الخاص بك من api.ipgeolocation.io هنا إذا كنت تريد فحص VPN
     MAX_REFERRALS_PER_IP = 2
 
 # --- حالات البوت (State) ---
@@ -67,6 +72,7 @@ class State(Enum):
     AWAITING_WINNER_THRESHOLD = auto()
     AWAITING_BROADCAST_MESSAGE = auto()
     AWAITING_CAPTCHA_VERIFICATION = auto()
+    AWAITING_WEB_APP_VERIFICATION = auto()
 
 
 # --- تعريفات أزرار الكيبورد (Callback) ---
@@ -96,6 +102,7 @@ class Callback(Enum):
 class Messages:
     VERIFIED_WELCOME = "أهلاً بك مجدداً! ✅\n\nاستخدم الأزرار أو الأوامر للتفاعل مع البوت."
     START_WELCOME = "أهلاً بك في البوت! 👋\n\nيجب عليك إتمام خطوات بسيطة للتحقق أولاً."
+    WEB_VERIFY_PROMPT = "خطوة ممتازة! للتحقق من أنك لا تستخدم نفس الجهاز عدة مرات، الرجاء الضغط على الزر أدناه."
     JOIN_PROMPT = "ممتاز! الخطوة الأخيرة هي الانضمام إلى قناتنا. انضم ثم اضغط على الزر أدناه."
     JOIN_SUCCESS = "تهانينا! لقد تم التحقق منك بنجاح."
     JOIN_FAIL = "❌ لم تنضم بعد. الرجاء الانضمام إلى القناة ثم حاول مرة أخرى."
@@ -104,7 +111,7 @@ class Messages:
     ADMIN_WELCOME = "👑 أهلاً بك في لوحة تحكم المالك."
     INVALID_INPUT = "إدخال غير صالح. الرجاء المحاولة مرة أخرى."
     VPN_DETECTED = "تم اكتشاف استخدامك لـ VPN. يرجى تعطيله والمحاولة مرة أخرى."
-    REFERRAL_ABUSE_DETECTED = "تم اكتشاف إساءة استخدام لنظام الإحالة. تم حظر هذه الإحالة."
+    REFERRAL_ABUSE_DETECTED = "تم اكتشاف إساءة استخدام لنظام الإحالة. تم حظر هذه الإحالة لأن الجهاز تم استخدامه سابقاً."
 
 # --- الاتصال بقاعدة البيانات (Supabase) ---
 try:
@@ -144,7 +151,6 @@ async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def is_vpn(ip_address: str) -> bool:
     if not Config.IPGEOLOCATION_API_KEY:
-        logger.warning("IPGEOLOCATION_API_KEY is not set. Skipping VPN check.")
         return False
     try:
         response = requests.get(f"https://api.ipgeolocation.io/ipgeo?apiKey={Config.IPGEOLOCATION_API_KEY}&ip={ip_address}&fields=security")
@@ -201,9 +207,6 @@ async def get_referrer(referred_id: int) -> Optional[int]:
 
 async def add_referral_mapping(referred_id: int, referrer_id: int, ip_address: str) -> bool:
     try:
-        # Note: IP-based abuse detection requires a reliable way to get user IPs.
-        # The 'ip_address' parameter here must be valid for this check to work.
-        # If the IP is "UNKNOWN" or always the same, this check will fail.
         if ip_address != "UNKNOWN":
             res = await run_sync_db(
                 lambda: supabase.table('referrals').select('ip_address', count='exact').eq('ip_address', ip_address).execute()
@@ -412,20 +415,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     user = update.effective_user
     user_id = user.id
-
-    # CRITICAL NOTE: Telegram bots cannot get user IPs directly.
-    # The 'REMOTE_ADDR' key used below is a placeholder and MUST be populated 
-    # by an external mechanism, such as a web app that the user opens.
-    # Without this, the IP will be "UNKNOWN", and all users will appear
-    # to have the same IP, which will incorrectly trigger the abuse detection.
-    # Example for a web app: you would pass the IP to bot_data when the user interacts.
-    # e.g., context.bot_data[f'ip_{user_id}'] = user_ip_from_webapp
-    ip_address = context.bot_data.get(f'ip_{user_id}', "UNKNOWN")
-
-    # VPN detection (only works if a real IP address is provided)
-    if ip_address != "UNKNOWN" and await is_vpn(ip_address):
-        await update.message.reply_text(Messages.VPN_DETECTED)
-        return
     
     db_user = await get_user_from_db(user_id)
     if db_user and db_user.get("is_verified"):
@@ -435,17 +424,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not db_user:
         await upsert_user_in_db({'user_id': user_id, 'full_name': user.full_name, 'username': user.username, 'total_real': 0, 'total_fake': 0})
 
+    # نخزن ID المُحيل (إن وجد) لمعالجته بعد التحقق من تطبيق الويب
     args = context.args
     if args:
         try:
             referrer_id = int(args[0])
-            if referrer_id != user_id and not await get_referrer(user_id):
-                if not await add_referral_mapping(user_id, referrer_id, ip_address):
-                    await update.message.reply_text(Messages.REFERRAL_ABUSE_DETECTED)
-                    return
-
-                await modify_referral_count(user_id=referrer_id, fake_delta=1)
-                logger.info(f"Referral link used: {user_id} referred by {referrer_id}. IP: {ip_address}. Referrer fake count incremented.")
+            if referrer_id != user_id:
+                context.user_data['referrer_id'] = referrer_id
         except (ValueError, IndexError):
             pass
             
@@ -481,6 +466,20 @@ async def ask_math_question(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     question, answer = generate_math_question()
     context.user_data['math_answer'] = answer
     await update.message.reply_text(f"ما هو ناتج {question}؟")
+    
+async def ask_web_verification(message: Message, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """يرسل رسالة مع زر لفتح تطبيق الويب."""
+    keyboard = ReplyKeyboardMarkup.from_button(
+        KeyboardButton(
+            text="🔒 اضغط هنا للتحقق من جهازك",
+            web_app=WebAppInfo(url=Config.WEB_APP_URL),
+        ),
+        resize_keyboard=True
+    )
+    await message.reply_text(
+        Messages.WEB_VERIFY_PROMPT,
+        reply_markup=keyboard,
+    )
 
 # --- معالجات الرسائل والمدخلات (Input Handlers) ---
 async def handle_verification_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -517,15 +516,49 @@ async def handle_captcha_verification(query: CallbackQuery, context: ContextType
         await query.answer("This button is not for you.", show_alert=True)
         return
 
-    del context.user_data['state']
+    context.user_data['state'] = State.AWAITING_WEB_APP_VERIFICATION
+    await query.message.delete() # ننظف رسالة الكابتشا
+    await ask_web_verification(query.message, context) # نطلب التحقق عبر الويب
+    
+async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """يعالج البيانات المرسلة من تطبيق الويب."""
+    if not update.effective_user or not update.message or not update.message.web_app_data:
+        return
+        
+    user_id = update.effective_user.id
+    data = json.loads(update.message.web_app_data.data)
+    ip_address = data.get("ip")
+
+    if not ip_address:
+        await update.message.reply_text(Messages.GENERIC_ERROR + " (لم يتم استلام IP)", reply_markup=ReplyKeyboardRemove())
+        return
+
+    # نخزن الـ IP الحقيقي
+    context.bot_data[f'ip_{user_id}'] = ip_address
+    logger.info(f"Received IP {ip_address} for user {user_id} from Web App.")
+
+    # الآن، نعالج منطق الإحالة باستخدام الـ IP الحقيقي
+    referrer_id = context.user_data.get('referrer_id')
+    if referrer_id and not await get_referrer(user_id):
+        if await add_referral_mapping(user_id, referrer_id, ip_address):
+            await modify_referral_count(user_id=referrer_id, fake_delta=1)
+            logger.info(f"Referral mapping for {user_id} by {referrer_id} successful with IP {ip_address}.")
+        else:
+            await update.message.reply_text(Messages.REFERRAL_ABUSE_DETECTED, reply_markup=ReplyKeyboardRemove())
+            return # نوقف عملية التحقق
+
+    # فحص الـ VPN
+    if await is_vpn(ip_address):
+        await update.message.reply_text(Messages.VPN_DETECTED, reply_markup=ReplyKeyboardRemove())
+        return
+
+    # ننتقل للخطوة التالية: طلب رقم الهاتف
     phone_button = [[KeyboardButton("اضغط هنا لمشاركة رقم هاتفك", request_contact=True)]]
-    await query.message.edit_text(
-        "رائع! الآن، من فضلك شارك رقم هاتفك لإكمال عملية التحقق."
-    )
-    await query.message.reply_text(
-        "اضغط على الزر أدناه لمشاركة رقم هاتفك.",
+    await update.message.reply_text(
+        "تم التحقق من جهازك بنجاح! الآن، من فضلك شارك رقم هاتفك لإكمال العملية.",
         reply_markup=ReplyKeyboardMarkup(phone_button, resize_keyboard=True, one_time_keyboard=True)
     )
+
 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.contact or update.effective_chat.type != Chat.PRIVATE:
@@ -546,7 +579,9 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(Messages.JOIN_PROMPT, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.message.reply_text("عذراً، هذا البوت مخصص فقط للمستخدمين من الدول العربية. رقمك غير مدعوم.", reply_markup=ReplyKeyboardRemove())
-        await ask_math_question(update, context)
+        context.user_data['state'] = State.AWAITING_WEB_APP_VERIFICATION
+        await ask_web_verification(update.message, context) # نطلب التحقق مرة أخرى إذا فشل
+
 
 async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = query.from_user
@@ -614,7 +649,7 @@ async def handle_admin_user_count(query: CallbackQuery) -> None:
     all_users = await get_all_users_from_db()
     total = len(all_users)
     verified = sum(1 for u in all_users if u.get('is_verified'))
-    text = f"� *إحصائيات مستخدمي البوت:*\n\n▫️ إجمالي المستخدمين: *{total}*\n✅ المستخدمون الموثقون: *{verified}*"
+    text = f"📈 *إحصائيات مستخدمي البوت:*\n\n▫️ إجمالي المستخدمين: *{total}*\n✅ المستخدمون الموثقون: *{verified}*"
     await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
 
 async def handle_admin_broadcast(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -887,6 +922,7 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
 
 # --- الدالة الرئيسية (Main Function) ---
 def main() -> None:
+    """بدء تشغيل البوت."""
     application = Application.builder().token(Config.BOT_TOKEN).job_queue(JobQueue()).build()
 
     # Handlers
@@ -900,6 +936,8 @@ def main() -> None:
 
     private_chat_filter = filters.ChatType.PRIVATE
     application.add_handler(MessageHandler(filters.CONTACT & private_chat_filter, handle_contact), group=2)
+    # معالج جديد لبيانات تطبيق الويب
+    application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler), group=2)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_chat_filter, handle_verification_text), group=2)
     
     logger.info("Bot is starting...")
