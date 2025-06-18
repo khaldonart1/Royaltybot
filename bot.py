@@ -94,6 +94,7 @@ class Callback(Enum):
     ADMIN_FORMAT_CONFIRM = "admin_format_confirm"
     ADMIN_FORCE_REVERIFICATION = "admin_force_reverification"
     ADMIN_UNIVERSAL_BROADCAST = "admin_universal_broadcast"
+    MY_REFERRALS_LOG = "my_referrals_log" # New Callback for referral log
 
 # --- رسائل البوت (Messages) ---
 class Messages:
@@ -109,6 +110,7 @@ class Messages:
     INVALID_INPUT = "إدخال غير صالح. الرجاء المحاولة مرة أخرى."
     REFERRAL_ABUSE_DEVICE_USED = "تم اكتشاف إساءة استخدام لنظام الإحالة. تم حظر هذه الإحالة لأن هذا الجهاز تم استخدامه سابقاً للتسجيل."
     REFERRAL_EXISTING_MEMBER = "💡 تنبيه: المستخدم الذي دعوته عضو بالفعل في القناة. سيتم احتساب هذه الإحالة كإحالة وهمية."
+    NO_REFERRALS_YET = "لم تقم بدعوة أي مستخدم بعد."
 
     
 # --- الاتصال بقاعدة البيانات (Supabase) ---
@@ -183,6 +185,62 @@ async def get_referrer(referred_id: int) -> Optional[int]:
     except Exception:
         return None
 
+async def add_referral_mapping(referred_id: int, referrer_id: int, device_id: str) -> bool:
+    """Checks only for device ID abuse and adds the referral mapping."""
+    try:
+        device_check_res = await run_sync_db(
+            lambda: supabase.table('referrals').select('device_id', count='exact').eq('device_id', device_id).execute()
+        )
+        if device_check_res.count > 0:
+            logger.warning(f"Abuse detected: Device ID {device_id} has already been used. Count: {device_check_res.count}. Blocking user {referred_id}.")
+            return False
+
+        data = {'referred_user_id': referred_id, 'referrer_user_id': referrer_id, 'device_id': device_id}
+        await run_sync_db(lambda: supabase.table('referrals').upsert(data, on_conflict='referred_user_id').execute())
+        return True
+    except Exception as e:
+        # Check if the error is due to the missing 'device_id' column
+        if 'column "device_id" does not exist' in str(e):
+            logger.warning("Column 'device_id' not found in 'referrals' table. Attempting to add it.")
+            try:
+                # This is a raw SQL command and might require admin privileges on your Supabase project
+                await run_sync_db(lambda: supabase.rpc('exec', {'sql': 'ALTER TABLE referrals ADD COLUMN device_id TEXT'}).execute())
+                logger.info("Successfully added 'device_id' column. Retrying the insert.")
+                # Retry the insertion after adding the column
+                await run_sync_db(lambda: supabase.table('referrals').upsert(data, on_conflict='referred_user_id').execute())
+                return True
+            except Exception as add_col_e:
+                logger.error(f"FATAL: Failed to add 'device_id' column and also failed to insert data. Error: {add_col_e}")
+                return False
+        else:
+            logger.error(f"DB_ERROR: Adding referral map for {referred_id} with device ID {device_id}: {e}")
+            return False
+
+async def get_my_referrals_details(user_id: int) -> Tuple[List[int], List[int]]:
+    """Fetches the user IDs of real and fake referrals for a given user."""
+    try:
+        all_my_referrals_res = await run_sync_db(
+            lambda: supabase.table('referrals').select('referred_user_id').eq('referrer_user_id', user_id).execute()
+        )
+        if not all_my_referrals_res.data:
+            return [], []
+
+        referred_ids = [ref['referred_user_id'] for ref in all_my_referrals_res.data]
+        
+        verified_status_res = await run_sync_db(
+            lambda: supabase.table('users').select('user_id, is_verified').in_('user_id', referred_ids).execute()
+        )
+        
+        verified_map = {u['user_id']: u.get('is_verified', False) for u in verified_status_res.data}
+        
+        real_referrals = [uid for uid in referred_ids if verified_map.get(uid) is True]
+        fake_referrals = [uid for uid in referred_ids if verified_map.get(uid) is False]
+        
+        return real_referrals, fake_referrals
+    except Exception as e:
+        logger.error(f"Error fetching referral details for user {user_id}: {e}")
+        return [], []
+
 async def reset_all_referrals_in_db() -> None:
     try:
         await run_sync_db(lambda: supabase.table('referrals').delete().gt('referred_user_id', 0).execute())
@@ -233,7 +291,7 @@ def get_referral_stats_text(user_info: Optional[Dict[str, Any]]) -> str:
     if not user_info: return "لا توجد لديك بيانات بعد. حاول مرة أخرى."
     total_real = int(user_info.get("total_real", 0) or 0)
     total_fake = int(user_info.get("total_fake", 0) or 0)
-    return f"� *إحصائيات إحالاتك:*\n\n✅ الإحالات الحقيقية: *{total_real}*\n⏳ الإحالات الوهمية: *{total_fake}*"
+    return f"📊 *إحصائيات إحالاتك:*\n\n✅ الإحالات الحقيقية: *{total_real}*\n⏳ الإحالات الوهمية: *{total_fake}*"
 
 def get_referral_link_text(user_id: int, bot_username: str) -> str:
     return f"🔗 رابط الإحالة الخاص بك:\n`https://t.me/{bot_username}?start={user_id}`"
@@ -274,6 +332,7 @@ def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("إحصائياتي 📊", callback_data=Callback.MY_REFERRALS.value)],
         [InlineKeyboardButton("رابطي 🔗", callback_data=Callback.MY_LINK.value)],
         [InlineKeyboardButton("🏆 أفضل 5 متسابقين", callback_data=Callback.TOP_5.value)],
+        [InlineKeyboardButton("📜 سجل إحالاتي", callback_data=f"{Callback.MY_REFERRALS_LOG.value}_real_1")],
     ]
     if user_id in Config.BOT_OWNER_IDS:
         keyboard.append([InlineKeyboardButton("👑 لوحة تحكم المالك 👑", callback_data=Callback.ADMIN_PANEL.value)])
@@ -281,7 +340,7 @@ def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 تقرير حقيقي", callback_data=f"{Callback.REPORT_PAGE.value}real_page_1"), InlineKeyboardButton("⏳ تقرير وهمي", callback_data=f"{Callback.REPORT_PAGE.value}fake_page_1")],
+        [InlineKeyboardButton("📊 تقرير حقيقي", callback_data=f"{Callback.REPORT_PAGE.value}_real_page_1"), InlineKeyboardButton("⏳ تقرير وهمي", callback_data=f"{Callback.REPORT_PAGE.value}_fake_page_1")],
         [InlineKeyboardButton("👥 عدد المستخدمين", callback_data=Callback.ADMIN_USER_COUNT.value)],
         [InlineKeyboardButton("Booo 👾 (تعديل يدوي)", callback_data=Callback.ADMIN_BOOO_MENU.value)],
         [InlineKeyboardButton("📢 إذاعة للموثقين", callback_data=Callback.ADMIN_BROADCAST.value)],
@@ -414,15 +473,12 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     referrer_id = context.user_data.get('referrer_id')
     
-    # Check if a referral record for this user already exists.
-    # This is to prevent re-processing if the user clicks the web app button multiple times.
     if await get_referrer(user_id):
         logger.warning(f"User {user_id} has already been processed for a referral. Skipping...")
     else:
         is_allowed = await add_referral_mapping(user_id, referrer_id, device_id)
         
         if is_allowed:
-            # Only add a fake point if there was a referrer
             if referrer_id:
                 await modify_referral_count(user_id=referrer_id, fake_delta=1)
                 logger.info(f"Referral mapping for {user_id} by {referrer_id} successful.")
@@ -514,6 +570,117 @@ async def handle_button_press_link(query: CallbackQuery, context: ContextTypes.D
     user_id = query.from_user.id
     text = get_referral_link_text(user_id, context.bot.username)
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu_keyboard(user_id), disable_web_page_preview=True)
+
+async def handle_my_referrals_log(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        _, log_type, page_str = query.data.split('_')
+        page = int(page_str)
+    except (ValueError, IndexError):
+        logger.error(f"Invalid callback data for referrals log: {query.data}")
+        await query.answer("خطأ في البيانات.", show_alert=True)
+        return
+
+    user_id = query.from_user.id
+    await query.edit_message_text(Messages.LOADING)
+
+    real_ids, fake_ids = await get_my_referrals_details(user_id)
+    
+    if not real_ids and not fake_ids:
+        await query.edit_message_text(Messages.NO_REFERRALS_YET, reply_markup=get_main_menu_keyboard(user_id))
+        return
+
+    id_list = real_ids if log_type == 'real' else fake_ids
+    title = "✅ الإحالات الحقيقية" if log_type == 'real' else "⏳ الإحالات الوهمية"
+
+    if not id_list:
+        text = f"📜 *سجل إحالاتك*\n\n{title}:\n\nلا يوجد لديك أي إحالات من هذا النوع."
+    else:
+        start_index = (page - 1) * Config.USERS_PER_PAGE
+        end_index = start_index + Config.USERS_PER_PAGE
+        page_ids = id_list[start_index:end_index]
+        
+        mentions = await asyncio.gather(*[get_user_mention(uid, context) for uid in page_ids])
+        
+        user_list_text = "\n".join(f"• {mention}" for mention in mentions)
+        text = f"📜 *سجل إحالاتك*\n\n{title} (صفحة {page}):\n{user_list_text}"
+
+    keyboard = []
+    nav_buttons = []
+    total_pages = math.ceil(len(id_list) / Config.USERS_PER_PAGE)
+    
+    if page > 1:
+        nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"{Callback.MY_REFERRALS_LOG.value}_{log_type}_{page-1}"))
+    if page < total_pages:
+        nav_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data=f"{Callback.MY_REFERRALS_LOG.value}_{log_type}_{page+1}"))
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+        
+    if log_type == 'real':
+        toggle_button = InlineKeyboardButton("عرض الوهمية ⏳", callback_data=f"{Callback.MY_REFERRALS_LOG.value}_fake_1")
+    else:
+        toggle_button = InlineKeyboardButton("عرض الحقيقية ✅", callback_data=f"{Callback.MY_REFERRALS_LOG.value}_real_1")
+    
+    keyboard.append([toggle_button])
+    keyboard.append([InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data=Callback.MAIN_MENU.value)])
+
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
+
+async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        _, report_type, _, page_str = query.data.split('_')
+        page = int(page_str)
+    except (ValueError, IndexError) as e:
+        logger.error(f"Error parsing report pagination callback: {query.data}, error: {e}")
+        await query.answer("خطأ في البيانات.", show_alert=True)
+        return
+    
+    await query.edit_message_text(Messages.LOADING)
+    
+    all_users = await get_all_users_from_db()
+    if report_type == 'real':
+        filtered_users = [u for u in all_users if u.get('total_real', 0) > 0]
+        filtered_users.sort(key=lambda u: u.get('total_real', 0), reverse=True)
+        title = "✅ *تقرير الإحالات الحقيقية*"
+        count_key = 'total_real'
+    else: # fake
+        filtered_users = [u for u in all_users if u.get('total_fake', 0) > 0]
+        filtered_users.sort(key=lambda u: u.get('total_fake', 0), reverse=True)
+        title = "⏳ *تقرير الإحالات الوهمية*"
+        count_key = 'total_fake'
+
+    if not filtered_users:
+        text = f"لا يوجد أي مستخدمين في هذا التقرير ({report_type}) حالياً."
+        await query.edit_message_text(text, reply_markup=get_admin_panel_keyboard())
+        return
+
+    start_index = (page - 1) * Config.USERS_PER_PAGE
+    end_index = start_index + Config.USERS_PER_PAGE
+    page_users = filtered_users[start_index:end_index]
+    total_pages = math.ceil(len(filtered_users) / Config.USERS_PER_PAGE)
+
+    report = f"{title} (صفحة {page} من {total_pages}):\n\n"
+    
+    mentions = await asyncio.gather(*[get_user_mention(u['user_id'], context) for u in page_users])
+    
+    for i, u_data in enumerate(page_users):
+        mention = mentions[i]
+        count = u_data.get(count_key, 0)
+        report += f"• {mention} - *{count}*\n"
+        
+    nav_buttons = []
+    callback_prefix = f"{Callback.REPORT_PAGE.value}_{report_type}_page_"
+    if page > 1:
+        nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"{callback_prefix}{page-1}"))
+    if page < total_pages:
+        nav_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data=f"{callback_prefix}{page+1}"))
+    
+    keyboard_layout = []
+    if nav_buttons:
+        keyboard_layout.append(nav_buttons)
+    keyboard_layout.append([InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data=Callback.ADMIN_PANEL.value)])
+    
+    await query.edit_message_text(text=report, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard_layout), disable_web_page_preview=True)
 
 # --- معالجات لوحة التحكم (Admin Panel Handlers) ---
 async def handle_admin_panel(query: CallbackQuery) -> None:
@@ -841,6 +1008,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif action == Callback.ADMIN_FORMAT_CONFIRM.value: await handle_admin_format_confirm(query)
     elif action == Callback.ADMIN_FORCE_REVERIFICATION.value: await handle_force_reverification(query)
     elif action in [c.value for c in [Callback.USER_ADD_REAL, Callback.USER_REMOVE_REAL, Callback.USER_ADD_FAKE, Callback.USER_REMOVE_FAKE]]: await handle_user_edit_action(query, context)
+    elif action.startswith(Callback.REPORT_PAGE.value): await handle_report_pagination(query, context)
+    elif action.startswith(Callback.MY_REFERRALS_LOG.value): await handle_my_referrals_log(query, context)
 
 # --- الدالة الرئيسية (Main Function) ---
 def main() -> None:
@@ -859,6 +1028,7 @@ def main() -> None:
     private_chat_filter = filters.ChatType.PRIVATE
     application.add_handler(MessageHandler(filters.CONTACT & private_chat_filter, handle_contact), group=2)
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler), group=2)
+    # This handler now only manages admin inputs, as the user verification flow no longer uses it.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_chat_filter, handle_admin_messages), group=2)
     
     logger.info("Bot is starting...")
