@@ -19,8 +19,8 @@ from telegram import (
     Update,
     WebAppInfo,
     ReplyKeyboardRemove,
-    ReplyKeyboardMarkup,  # <-- تمت إضافته هنا
-    Message               # <-- وتمت إضافة هذا
+    ReplyKeyboardMarkup,
+    Message
 )
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
@@ -50,7 +50,7 @@ class Config:
     BOT_TOKEN = "7950170561:AAH5OtiK38BBhAnVofqxnLWRYbaZaIaKY4s"
     SUPABASE_URL = "https://jofxsqsgarvzolgphqjg.supabase.co"
     SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
-    # !!! هام: يجب تغيير هذا الرابط لاحقاً إلى الرابط العام من PythonAnywhere !!!
+    # !!! هام: يجب وضع الرابط العام من PythonAnywhere هنا !!!
     WEB_APP_URL = "https://khaldonart.pythonanywhere.com" 
     CHANNEL_ID = -1002686156311
     CHANNEL_URL = "https://t.me/Ry_Hub"
@@ -97,6 +97,9 @@ class Callback(Enum):
     ADMIN_RESET_ALL = "admin_reset_all"
     ADMIN_RESET_CONFIRM = "admin_reset_confirm"
     CAPTCHA_BUTTON = "captcha_button"
+    REQUEST_PHONE_CONTACT = "request_phone_contact"
+    ADMIN_FORMAT_BOT = "admin_format_bot"
+    ADMIN_FORMAT_CONFIRM = "admin_format_confirm"
 
 # --- رسائل البوت (Messages) ---
 class Messages:
@@ -232,6 +235,18 @@ async def reset_all_referrals_in_db() -> None:
     except Exception as e:
         logger.error(f"DB_ERROR: Resetting all referrals: {e}")
 
+async def format_bot_in_db() -> None:
+    try:
+        # Delete all referrals first
+        await run_sync_db(lambda: supabase.table('referrals').delete().gt('referred_user_id', 0).execute())
+        logger.info("All referrals have been deleted from the database.")
+        # Delete all users
+        await run_sync_db(lambda: supabase.table('users').delete().gt('user_id', 0).execute())
+        logger.info("All users have been deleted from the database.")
+        logger.info("BOT HAS BEEN FORMATTED.")
+    except Exception as e:
+        logger.error(f"DB_ERROR: Formatting bot: {e}")
+
 # --- دوال المنطق الأساسي (Core Logic) ---
 
 async def modify_referral_count(user_id: int, real_delta: int = 0, fake_delta: int = 0) -> Optional[Dict[str, Any]]:
@@ -363,6 +378,7 @@ def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📢 إذاعة للكل", callback_data=Callback.ADMIN_BROADCAST.value)],
         [InlineKeyboardButton("⚠️ تصفير كل الإحالات", callback_data=Callback.ADMIN_RESET_ALL.value)],
         [InlineKeyboardButton("⚙️ ترحيل وإعادة حساب البيانات", callback_data=Callback.DATA_MIGRATION.value)],
+        [InlineKeyboardButton("💀 فورمات البوت (حذف كل شيء)", callback_data=Callback.ADMIN_FORMAT_BOT.value)],
         [InlineKeyboardButton("⬅️ العودة للقائمة الرئيسية", callback_data=Callback.MAIN_MENU.value)],
     ])
 
@@ -468,13 +484,12 @@ async def ask_math_question(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(f"ما هو ناتج {question}؟")
     
 async def ask_web_verification(message: Message, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يرسل رسالة مع زر لفتح تطبيق الويب."""
-    keyboard = ReplyKeyboardMarkup.from_button(
-        KeyboardButton(
+    """يرسل رسالة مع زر مضمن لفتح تطبيق الويب."""
+    keyboard = InlineKeyboardMarkup.from_button(
+        InlineKeyboardButton(
             text="🔒 اضغط هنا للتحقق من جهازك",
             web_app=WebAppInfo(url=Config.WEB_APP_URL),
-        ),
-        resize_keyboard=True
+        )
     )
     await message.reply_text(
         Messages.WEB_VERIFY_PROMPT,
@@ -517,7 +532,7 @@ async def handle_captcha_verification(query: CallbackQuery, context: ContextType
         return
 
     context.user_data['state'] = State.AWAITING_WEB_APP_VERIFICATION
-    await query.message.delete() # ننظف رسالة الكابتشا
+    await query.message.edit_text("إجابة صحيحة!") # تعديل الرسالة بدلاً من حذفها
     await ask_web_verification(query.message, context) # نطلب التحقق عبر الويب
     
 async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -528,9 +543,15 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     data = json.loads(update.message.web_app_data.data)
     ip_address = data.get("ip")
+    
+    # نزيل لوحة المفاتيح القديمة الخاصة بالويب
+    await update.message.reply_text(
+        "تم التحقق من جهازك بنجاح!",
+        reply_markup=ReplyKeyboardRemove()
+    )
 
     if not ip_address:
-        await update.message.reply_text(Messages.GENERIC_ERROR + " (لم يتم استلام IP)", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(Messages.GENERIC_ERROR + " (لم يتم استلام IP)")
         return
 
     # نخزن الـ IP الحقيقي
@@ -544,18 +565,32 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await modify_referral_count(user_id=referrer_id, fake_delta=1)
             logger.info(f"Referral mapping for {user_id} by {referrer_id} successful with IP {ip_address}.")
         else:
-            await update.message.reply_text(Messages.REFERRAL_ABUSE_DETECTED, reply_markup=ReplyKeyboardRemove())
+            await update.message.reply_text(Messages.REFERRAL_ABUSE_DETECTED)
             return # نوقف عملية التحقق
 
     # فحص الـ VPN
     if await is_vpn(ip_address):
-        await update.message.reply_text(Messages.VPN_DETECTED, reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(Messages.VPN_DETECTED)
         return
 
-    # ننتقل للخطوة التالية: طلب رقم الهاتف
-    phone_button = [[KeyboardButton("اضغط هنا لمشاركة رقم هاتفك", request_contact=True)]]
+    # ننتقل للخطوة التالية: طلب رقم الهاتف عبر زر مضمن
+    keyboard = InlineKeyboardMarkup.from_button(
+        InlineKeyboardButton(
+            text="📱 مشاركة رقم الهاتف",
+            callback_data=Callback.REQUEST_PHONE_CONTACT.value
+        )
+    )
     await update.message.reply_text(
-        "تم التحقق من جهازك بنجاح! الآن، من فضلك شارك رقم هاتفك لإكمال العملية.",
+        "الآن، من فضلك شارك رقم هاتفك لإكمال العملية بالضغط على الزر أدناه.",
+        reply_markup=keyboard
+    )
+    
+async def request_phone_handler(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """يرسل لوحة المفاتيح لطلب جهة الاتصال."""
+    await query.answer()
+    phone_button = [[KeyboardButton("اضغط هنا لمشاركة رقم هاتفك", request_contact=True)]]
+    await query.message.reply_text(
+        "الرجاء الضغط على الزر الذي سيظهر في الأسفل لمشاركة رقم هاتفك.",
         reply_markup=ReplyKeyboardMarkup(phone_button, resize_keyboard=True, one_time_keyboard=True)
     )
 
@@ -698,6 +733,31 @@ async def handle_admin_reset_confirm(query: CallbackQuery) -> None:
     await reset_all_referrals_in_db()
     await query.edit_message_text(text="✅ تم تصفير جميع إحصائيات الإحالات بنجاح.", reply_markup=get_admin_panel_keyboard())
 
+async def handle_admin_format_bot(query: CallbackQuery) -> None:
+    """Sends the final confirmation for formatting the bot."""
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("‼️ نعم، قم بحذف كل شيء ‼️", callback_data=Callback.ADMIN_FORMAT_CONFIRM.value)],
+        [InlineKeyboardButton("❌ لا، إلغاء الأمر", callback_data=Callback.ADMIN_PANEL.value)]
+    ])
+    await query.edit_message_text(
+        text="⚠️⚠️⚠️ *تحذير خطير جداً* ⚠️⚠️⚠️\n\n"
+             "أنت على وشك حذف **جميع بيانات البوت بشكل نهائي**.\n"
+             "سيتم حذف:\n"
+             "- جميع المستخدمين المسجلين.\n"
+             "- جميع الإحالات (الحقيقية والوهمية).\n"
+             "- كل شيء حرفياً.\n\n"
+             "**هذا الإجراء لا يمكن التراجع عنه.** هل أنت متأكد تماماً؟",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard
+    )
+
+async def handle_admin_format_confirm(query: CallbackQuery) -> None:
+    """Executes the bot format."""
+    await query.edit_message_text(text="⏳ جاري تنفيذ الفورمات...")
+    await format_bot_in_db()
+    await query.edit_message_text(text="✅ تم عمل فورمات للبوت بنجاح. لقد عاد إلى حالة المصنع.", reply_markup=get_admin_panel_keyboard())
+
+
 async def handle_booo_menu(query: CallbackQuery) -> None:
     await query.edit_message_text(text="👾 *Booo*\n\nاختر الأداة التي تريد استخدامها:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_booo_menu_keyboard())
 
@@ -805,7 +865,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif action == Callback.ADMIN_RESET_CONFIRM.value: await handle_admin_reset_confirm(query)
     elif action == Callback.DATA_MIGRATION.value: await handle_data_migration(query, context)
     elif action == Callback.CAPTCHA_BUTTON.value: await handle_captcha_verification(query, context)
+    elif action == Callback.REQUEST_PHONE_CONTACT.value: await request_phone_handler(query, context)
     elif action == Callback.ADMIN_BROADCAST.value: await handle_admin_broadcast(query, context)
+    elif action == Callback.ADMIN_FORMAT_BOT.value: await handle_admin_format_bot(query)
+    elif action == Callback.ADMIN_FORMAT_CONFIRM.value: await handle_admin_format_confirm(query)
     elif action in [c.value for c in [Callback.USER_ADD_REAL, Callback.USER_REMOVE_REAL, Callback.USER_ADD_FAKE, Callback.USER_REMOVE_FAKE]]: await handle_user_edit_action(query, context)
     elif action.startswith(Callback.REPORT_PAGE.value): await handle_report_pagination(query, context)
 
