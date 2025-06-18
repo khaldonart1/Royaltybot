@@ -112,7 +112,7 @@ class Messages:
     JOIN_FAIL = "❌ لم تنضم بعد. الرجاء الانضمام إلى القناة ثم حاول مرة أخرى."
     GENERIC_ERROR = "حدث خطأ ما. يرجى المحاولة مرة أخرى لاحقاً."
     LOADING = "⏳ جاري التحميل..."
-    ADMIN_WELCOME = "� أهلاً بك في لوحة تحكم المالك."
+    ADMIN_WELCOME = "👑 أهلاً بك في لوحة تحكم المالك."
     INVALID_INPUT = "إدخال غير صالح. الرجاء المحاولة مرة أخرى."
     VPN_DETECTED = "تم اكتشاف استخدامك لـ VPN. يرجى تعطيله والمحاولة مرة أخرى."
     REFERRAL_ABUSE_DETECTED = "تم اكتشاف إساءة استخدام لنظام الإحالة. تم حظر هذه الإحالة لأن الجهاز تم استخدامه سابقاً."
@@ -496,14 +496,12 @@ async def handle_verification_text(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(user_id))
         return
 
-    # This is now the first step in the verification flow after /start
     if 'math_answer' in context.user_data:
         try:
             if int(update.message.text) == context.user_data['math_answer']:
                 del context.user_data['math_answer']
                 context.user_data['state'] = State.AWAITING_WEB_APP_VERIFICATION
                 await update.message.reply_text(Messages.MATH_CORRECT)
-                # Proceed directly to web app verification
                 await ask_web_verification(update.message, context)
             else:
                 await update.message.reply_text("إجابة خاطئة. حاول مرة اخرى.")
@@ -512,50 +510,79 @@ async def handle_verification_text(update: Update, context: ContextTypes.DEFAULT
             await update.message.reply_text("من فضلك أدخل رقماً صحيحاً كإجابة.")
 
 async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles data sent from the web app."""
-    if not update.effective_user or not update.message or not update.message.web_app_data:
-        return
-        
-    user_id = update.effective_user.id
-    data = json.loads(update.message.web_app_data.data)
-    ip_address = data.get("ip")
+    """Handles data sent from the web app with enhanced logging."""
+    logger.info("--- web_app_data_handler started ---")
     
-    await update.message.reply_text(
-        "تم التحقق من جهازك بنجاح!",
-        reply_markup=ReplyKeyboardRemove()
-    )
-
-    if not ip_address:
-        await update.message.reply_text(Messages.GENERIC_ERROR + " (لم يتم استلام IP)")
+    if not update.message or not update.message.web_app_data:
+        logger.warning("web_app_data_handler received an update without web_app_data.")
         return
 
-    context.bot_data[f'ip_{user_id}'] = ip_address
-    logger.info(f"Received IP {ip_address} for user {user_id} from Web App.")
+    user_id = update.effective_user.id
+    logger.info(f"Processing web app data for user_id: {user_id}")
 
-    referrer_id = context.user_data.get('referrer_id')
-    if referrer_id and not await get_referrer(user_id):
-        if await add_referral_mapping(user_id, referrer_id, ip_address):
-            await modify_referral_count(user_id=referrer_id, fake_delta=1)
-            logger.info(f"Referral mapping for {user_id} by {referrer_id} successful with IP {ip_address}.")
-        else:
-            await update.message.reply_text(Messages.REFERRAL_ABUSE_DETECTED)
+    try:
+        raw_data = update.message.web_app_data.data
+        logger.info(f"Raw data received from web app: {raw_data}")
+        
+        data = json.loads(raw_data)
+        ip_address = data.get("ip")
+        
+        if data.get("error"):
+            logger.error(f"Web app reported an error for user {user_id}: {data.get('details')}")
+            await update.message.reply_text("حدث خطأ أثناء محاولة التحقق من جهازك من طرف المتصفح. يرجى المحاولة مرة أخرى.")
             return
 
-    if await is_vpn(ip_address):
-        await update.message.reply_text(Messages.VPN_DETECTED)
-        return
-
-    keyboard = InlineKeyboardMarkup.from_button(
-        InlineKeyboardButton(
-            text="📱 مشاركة رقم الهاتف",
-            callback_data=Callback.REQUEST_PHONE_CONTACT.value
+        logger.info(f"Successfully parsed IP address: {ip_address} for user {user_id}")
+        
+        await update.message.reply_text(
+            "تم التحقق من جهازك بنجاح!",
+            reply_markup=ReplyKeyboardRemove()
         )
-    )
-    await update.message.reply_text(
-        "الآن، من فضلك شارك رقم هاتفك لإكمال العملية بالضغط على الزر أدناه.",
-        reply_markup=keyboard
-    )
+
+        if not ip_address:
+            logger.error(f"IP address is missing in the data from web app for user {user_id}.")
+            await update.message.reply_text(Messages.GENERIC_ERROR + " (لم يتم استلام IP)")
+            return
+
+        context.bot_data[f'ip_{user_id}'] = ip_address
+        
+        referrer_id = context.user_data.get('referrer_id')
+        if referrer_id and not await get_referrer(user_id):
+            logger.info(f"Processing referral for {user_id} by referrer {referrer_id}")
+            if await add_referral_mapping(user_id, referrer_id, ip_address):
+                await modify_referral_count(user_id=referrer_id, fake_delta=1)
+                logger.info(f"Referral mapping for {user_id} by {referrer_id} successful.")
+            else:
+                logger.warning(f"Referral abuse detected for user {user_id} from IP {ip_address}.")
+                await update.message.reply_text(Messages.REFERRAL_ABUSE_DETECTED)
+                return
+
+        if await is_vpn(ip_address):
+            logger.warning(f"VPN detected for user {user_id} with IP {ip_address}.")
+            await update.message.reply_text(Messages.VPN_DETECTED)
+            return
+
+        logger.info(f"All checks passed for user {user_id}. Proceeding to phone verification.")
+        keyboard = InlineKeyboardMarkup.from_button(
+            InlineKeyboardButton(
+                text="📱 مشاركة رقم الهاتف",
+                callback_data=Callback.REQUEST_PHONE_CONTACT.value
+            )
+        )
+        await update.message.reply_text(
+            "الآن، من فضلك شارك رقم هاتفك لإكمال العملية بالضغط على الزر أدناه.",
+            reply_markup=keyboard
+        )
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to decode JSON from web app: {raw_data}. Error: {e}")
+        await update.message.reply_text("حدث خطأ في معالجة البيانات من صفحة التحقق.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred in web_app_data_handler for user {user_id}: {e}", exc_info=True)
+        await update.message.reply_text(Messages.GENERIC_ERROR)
     
+    logger.info("--- web_app_data_handler finished ---")
+
 async def request_phone_handler(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer()
     phone_button = [[KeyboardButton("اضغط هنا لمشاركة رقم هاتفك", request_contact=True)]]
