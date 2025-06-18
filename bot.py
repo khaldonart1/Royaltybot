@@ -510,78 +510,93 @@ async def handle_verification_text(update: Update, context: ContextTypes.DEFAULT
             await update.message.reply_text("من فضلك أدخل رقماً صحيحاً كإجابة.")
 
 async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles data sent from the web app with enhanced logging."""
-    logger.info("--- web_app_data_handler started ---")
+    """Handles data sent from the web app with enhanced logging and user feedback."""
+    logger.info("--- web_app_data_handler TRIGGERED ---")
     
-    if not update.message or not update.message.web_app_data:
-        logger.warning("web_app_data_handler received an update without web_app_data.")
+    if not update.message or not update.effective_user:
+        logger.error("web_app_data_handler was triggered but 'update.message' or 'update.effective_user' is missing.")
         return
 
     user_id = update.effective_user.id
-    logger.info(f"Processing web app data for user_id: {user_id}")
-
+    
     try:
-        raw_data = update.message.web_app_data.data
-        logger.info(f"Raw data received from web app: {raw_data}")
-        
-        data = json.loads(raw_data)
-        ip_address = data.get("ip")
-        
-        if data.get("error"):
-            logger.error(f"Web app reported an error for user {user_id}: {data.get('details')}")
-            await update.message.reply_text("حدث خطأ أثناء محاولة التحقق من جهازك من طرف المتصفح. يرجى المحاولة مرة أخرى.")
-            return
-
-        logger.info(f"Successfully parsed IP address: {ip_address} for user {user_id}")
-        
-        await update.message.reply_text(
-            "تم التحقق من جهازك بنجاح!",
-            reply_markup=ReplyKeyboardRemove()
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="⏳ استلمت البيانات من صفحة التحقق، جاري المعالجة..."
         )
+    except Exception as e:
+        logger.error(f"Failed to send initial confirmation message to user {user_id}: {e}")
+        
+    try:
+        logger.info(f"Processing web app data for user_id: {user_id}")
 
-        if not ip_address:
-            logger.error(f"IP address is missing in the data from web app for user {user_id}.")
-            await update.message.reply_text(Messages.GENERIC_ERROR + " (لم يتم استلام IP)")
+        if not update.message.web_app_data:
+            logger.warning(f"Handler triggered for user {user_id}, but no web_app_data found in the message.")
+            await context.bot.send_message(chat_id=user_id, text="لم أجد بيانات التحقق. يرجى المحاولة مرة أخرى.")
             return
+            
+        raw_data = update.message.web_app_data.data
+        logger.info(f"Raw data received for user {user_id}: {raw_data}")
+        
+        try:
+            data = json.loads(raw_data)
+        except json.JSONDecodeError:
+            logger.error(f"Failed to decode JSON for user {user_id}. Raw data: {raw_data}")
+            await context.bot.send_message(chat_id=user_id, text="حدث خطأ في تنسيق بيانات التحقق. حاول مرة أخرى.")
+            return
+
+        if data.get("error"):
+            logger.error(f"Web app reported a client-side error for user {user_id}: {data.get('details')}")
+            await context.bot.send_message(chat_id=user_id, text="أبلغت صفحة التحقق عن وجود خطأ. يرجى التأكد من اتصالك بالإنترنت والمحاولة مرة أخرى.")
+            return
+        
+        ip_address = data.get("ip")
+        if not ip_address:
+            logger.error(f"IP address is missing in parsed data for user {user_id}. Data: {data}")
+            await context.bot.send_message(chat_id=user_id, text="لم يتم العثور على عنوان IP في بيانات التحقق. يرجى المحاولة مرة أخرى.")
+            return
+            
+        logger.info(f"Successfully parsed IP address '{ip_address}' for user {user_id}")
 
         context.bot_data[f'ip_{user_id}'] = ip_address
         
         referrer_id = context.user_data.get('referrer_id')
         if referrer_id and not await get_referrer(user_id):
-            logger.info(f"Processing referral for {user_id} by referrer {referrer_id}")
-            if await add_referral_mapping(user_id, referrer_id, ip_address):
-                await modify_referral_count(user_id=referrer_id, fake_delta=1)
-                logger.info(f"Referral mapping for {user_id} by {referrer_id} successful.")
-            else:
+            logger.info(f"Processing referral for {user_id} by referrer {referrer_id} with IP {ip_address}")
+            if not await add_referral_mapping(user_id, referrer_id, ip_address):
                 logger.warning(f"Referral abuse detected for user {user_id} from IP {ip_address}.")
-                await update.message.reply_text(Messages.REFERRAL_ABUSE_DETECTED)
+                await context.bot.send_message(chat_id=user_id, text=Messages.REFERRAL_ABUSE_DETECTED)
                 return
-
+            else:
+                await modify_referral_count(user_id=referrer_id, fake_delta=1)
+                logger.info(f"Referral mapping for {user_id} successful.")
+        
         if await is_vpn(ip_address):
             logger.warning(f"VPN detected for user {user_id} with IP {ip_address}.")
-            await update.message.reply_text(Messages.VPN_DETECTED)
+            await context.bot.send_message(chat_id=user_id, text=Messages.VPN_DETECTED)
             return
 
-        logger.info(f"All checks passed for user {user_id}. Proceeding to phone verification.")
+        logger.info(f"All IP checks passed for user {user_id}. Proceeding to phone verification.")
         keyboard = InlineKeyboardMarkup.from_button(
             InlineKeyboardButton(
                 text="📱 مشاركة رقم الهاتف",
                 callback_data=Callback.REQUEST_PHONE_CONTACT.value
             )
         )
-        await update.message.reply_text(
-            "الآن، من فضلك شارك رقم هاتفك لإكمال العملية بالضغط على الزر أدناه.",
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="الآن، من فضلك شارك رقم هاتفك لإكمال العملية بالضغط على الزر أدناه.",
             reply_markup=keyboard
         )
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to decode JSON from web app: {raw_data}. Error: {e}")
-        await update.message.reply_text("حدث خطأ في معالجة البيانات من صفحة التحقق.")
     except Exception as e:
         logger.error(f"An unexpected error occurred in web_app_data_handler for user {user_id}: {e}", exc_info=True)
-        await update.message.reply_text(Messages.GENERIC_ERROR)
-    
-    logger.info("--- web_app_data_handler finished ---")
+        try:
+            await context.bot.send_message(chat_id=user_id, text=Messages.GENERIC_ERROR)
+        except Exception as send_error:
+            logger.error(f"Could not even send a final error message to user {user_id}: {send_error}")
+    finally:
+        logger.info(f"--- web_app_data_handler finished for user {user_id} ---")
 
 async def request_phone_handler(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer()
