@@ -73,6 +73,7 @@ class State(Enum):
     AWAITING_BROADCAST_MESSAGE = auto()
     AWAITING_CAPTCHA_VERIFICATION = auto()
     AWAITING_WEB_APP_VERIFICATION = auto()
+    AWAITING_UNIVERSAL_BROADCAST_MESSAGE = auto() # New State for Feature 2
 
 
 # --- تعريفات أزرار الكيبورد (Callback) ---
@@ -100,6 +101,8 @@ class Callback(Enum):
     REQUEST_PHONE_CONTACT = "request_phone_contact"
     ADMIN_FORMAT_BOT = "admin_format_bot"
     ADMIN_FORMAT_CONFIRM = "admin_format_confirm"
+    ADMIN_FORCE_REVERIFICATION = "admin_force_reverification" # New Callback for Feature 1
+    ADMIN_UNIVERSAL_BROADCAST = "admin_universal_broadcast" # New Callback for Feature 2
 
 # --- رسائل البوت (Messages) ---
 class Messages:
@@ -225,7 +228,6 @@ async def add_referral_mapping(referred_id: int, referrer_id: int, ip_address: s
         logger.error(f"DB_ERROR: Adding referral map for {referred_id} by {referrer_id}: {e}")
         return False
 
-
 async def reset_all_referrals_in_db() -> None:
     try:
         await run_sync_db(lambda: supabase.table('referrals').delete().gt('referred_user_id', 0).execute())
@@ -246,6 +248,15 @@ async def format_bot_in_db() -> None:
         logger.info("BOT HAS BEEN FORMATTED.")
     except Exception as e:
         logger.error(f"DB_ERROR: Formatting bot: {e}")
+
+async def unverify_all_users_in_db() -> None:
+    """Sets the is_verified status of all users to False. (Feature 1)"""
+    try:
+        update_payload = {"is_verified": False}
+        await run_sync_db(lambda: supabase.table('users').update(update_payload).gt('user_id', 0).execute())
+        logger.info("All users have been successfully marked as unverified.")
+    except Exception as e:
+        logger.error(f"DB_ERROR: Failed while un-verifying all users: {e}")
 
 # --- دوال المنطق الأساسي (Core Logic) ---
 
@@ -375,7 +386,9 @@ def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 تقرير حقيقي", callback_data=f"{Callback.REPORT_PAGE.value}real_page_1"), InlineKeyboardButton("⏳ تقرير وهمي", callback_data=f"{Callback.REPORT_PAGE.value}fake_page_1")],
         [InlineKeyboardButton("👥 عدد المستخدمين", callback_data=Callback.ADMIN_USER_COUNT.value), InlineKeyboardButton("🏆 اختيار فائز", callback_data=Callback.PICK_WINNER.value)],
         [InlineKeyboardButton("Booo 👾 (تعديل يدوي)", callback_data=Callback.ADMIN_BOOO_MENU.value)],
-        [InlineKeyboardButton("📢 إذاعة للكل", callback_data=Callback.ADMIN_BROADCAST.value)],
+        [InlineKeyboardButton("📢 إذاعة للموثقين", callback_data=Callback.ADMIN_BROADCAST.value)],
+        [InlineKeyboardButton("📢 إذاعة للكل", callback_data=Callback.ADMIN_UNIVERSAL_BROADCAST.value)], # New Button for Feature 2
+        [InlineKeyboardButton("🔄 فرض إعادة التحقق", callback_data=Callback.ADMIN_FORCE_REVERIFICATION.value)], # New Button for Feature 1
         [InlineKeyboardButton("⚠️ تصفير كل الإحالات", callback_data=Callback.ADMIN_RESET_ALL.value)],
         [InlineKeyboardButton("⚙️ ترحيل وإعادة حساب البيانات", callback_data=Callback.DATA_MIGRATION.value)],
         [InlineKeyboardButton("💀 فورمات البوت (حذف كل شيء)", callback_data=Callback.ADMIN_FORMAT_BOT.value)],
@@ -438,9 +451,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if not db_user:
-        await upsert_user_in_db({'user_id': user_id, 'full_name': user.full_name, 'username': user.username, 'total_real': 0, 'total_fake': 0})
+        await upsert_user_in_db({'user_id': user_id, 'full_name': user.full_name, 'username': user.username, 'total_real': 0, 'total_fake': 0, 'is_verified': False})
 
-    # نخزن ID المُحيل (إن وجد) لمعالجته بعد التحقق من تطبيق الويب
+    # The rest of the verification flow will be triggered because is_verified is False
     args = context.args
     if args:
         try:
@@ -694,7 +707,7 @@ async def handle_admin_broadcast(query: CallbackQuery, context: ContextTypes.DEF
 async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message: return
     context.user_data['state'] = None
-    await update.message.reply_text("⏳ جاري إرسال الإذاعة...")
+    await update.message.reply_text("⏳ جاري إرسال الإذاعة للمستخدمين الموثقين...")
 
     all_users = await get_all_users_from_db()
     verified_users = [u for u in all_users if u.get('is_verified')]
@@ -716,9 +729,45 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
         await asyncio.sleep(0.1)
 
     await update.message.reply_text(
-        f"✅ اكتملت الإذاعة!\n\n"
+        f"✅ اكتملت الإذاعة للموثقين!\n\n"
         f"تم الإرسال بنجاح إلى: {sent_count} مستخدم\n"
         f"فشل الإرسال إلى: {failed_count} مستخدم"
+    )
+
+async def handle_admin_universal_broadcast(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompts the admin to send the message for the universal broadcast. (Feature 2)"""
+    context.user_data['state'] = State.AWAITING_UNIVERSAL_BROADCAST_MESSAGE
+    await query.edit_message_text(text="أرسل الآن الرسالة التي تريد إذاعتها لجميع المستخدمين المسجلين (موثقين وغير موثقين).")
+
+async def handle_universal_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends a message to every single user in the database. (Feature 2)"""
+    if not update.message: return
+    context.user_data['state'] = None
+    await update.message.reply_text("⏳ جاري إرسال الإذاعة الشاملة لجميع المستخدمين...")
+
+    all_users = await get_all_users_from_db()
+    
+    sent_count = 0
+    failed_count = 0
+
+    for user in all_users:
+        try:
+            await context.bot.copy_message(
+                chat_id=user['user_id'],
+                from_chat_id=update.effective_chat.id,
+                message_id=update.message.message_id
+            )
+            sent_count += 1
+        except TelegramError as e:
+            # This error is common if the user has blocked the bot.
+            logger.error(f"Failed to send universal broadcast to {user['user_id']}: {e}")
+            failed_count += 1
+        await asyncio.sleep(0.1)  # Small delay to avoid hitting Telegram's rate limits
+
+    await update.message.reply_text(
+        f"✅ اكتملت الإذاعة الشاملة!\n\n"
+        f"✔️ تم الإرسال بنجاح إلى: {sent_count} مستخدم\n"
+        f"❌ فشل الإرسال إلى: {failed_count} مستخدم"
     )
 
 async def handle_admin_reset_all(query: CallbackQuery) -> None:
@@ -757,6 +806,11 @@ async def handle_admin_format_confirm(query: CallbackQuery) -> None:
     await format_bot_in_db()
     await query.edit_message_text(text="✅ تم عمل فورمات للبوت بنجاح. لقد عاد إلى حالة المصنع.", reply_markup=get_admin_panel_keyboard())
 
+async def handle_force_reverification(query: CallbackQuery) -> None:
+    """Handles the admin's request to force re-verification for all users. (Feature 1)"""
+    await query.edit_message_text(text="⏳ جاري إلغاء تحقق جميع المستخدمين...")
+    await unverify_all_users_in_db()
+    await query.edit_message_text(text="✅ تم إلغاء تحقق جميع المستخدمين بنجاح. سيُطلب منهم إتمام التحقق مرة أخرى عند استخدام الأمر /start.", reply_markup=get_admin_panel_keyboard())
 
 async def handle_booo_menu(query: CallbackQuery) -> None:
     await query.edit_message_text(text="👾 *Booo*\n\nاختر الأداة التي تريد استخدامها:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_booo_menu_keyboard())
@@ -867,8 +921,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif action == Callback.CAPTCHA_BUTTON.value: await handle_captcha_verification(query, context)
     elif action == Callback.REQUEST_PHONE_CONTACT.value: await request_phone_handler(query, context)
     elif action == Callback.ADMIN_BROADCAST.value: await handle_admin_broadcast(query, context)
+    elif action == Callback.ADMIN_UNIVERSAL_BROADCAST.value: await handle_admin_universal_broadcast(query, context) # Route for Feature 2
     elif action == Callback.ADMIN_FORMAT_BOT.value: await handle_admin_format_bot(query)
     elif action == Callback.ADMIN_FORMAT_CONFIRM.value: await handle_admin_format_confirm(query)
+    elif action == Callback.ADMIN_FORCE_REVERIFICATION.value: await handle_force_reverification(query) # Route for Feature 1
     elif action in [c.value for c in [Callback.USER_ADD_REAL, Callback.USER_REMOVE_REAL, Callback.USER_ADD_FAKE, Callback.USER_REMOVE_FAKE]]: await handle_user_edit_action(query, context)
     elif action.startswith(Callback.REPORT_PAGE.value): await handle_report_pagination(query, context)
 
@@ -880,6 +936,10 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
 
     if state == State.AWAITING_BROADCAST_MESSAGE:
         await handle_broadcast_message(update, context)
+        return
+
+    if state == State.AWAITING_UNIVERSAL_BROADCAST_MESSAGE: # Handle message for Feature 2
+        await handle_universal_broadcast_message(update, context)
         return
 
     if state == State.AWAITING_EDIT_USER_ID:
