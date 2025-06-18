@@ -61,14 +61,12 @@ class Config:
     }
     USERS_PER_PAGE = 15
     MENTION_CACHE_TTL_SECONDS = 300
-    REFERRER_INVITE_LIMIT = 1
 
 # --- حالات البوت (State) ---
 class State(Enum):
     AWAITING_EDIT_USER_ID = auto()
     AWAITING_EDIT_AMOUNT = auto()
     AWAITING_BROADCAST_MESSAGE = auto()
-    AWAITING_WEB_APP_VERIFICATION = auto()
     AWAITING_UNIVERSAL_BROADCAST_MESSAGE = auto()
 
 # --- تعريفات أزرار الكيبورد (Callback) ---
@@ -100,8 +98,8 @@ class Callback(Enum):
 # --- رسائل البوت (Messages) ---
 class Messages:
     VERIFIED_WELCOME = "أهلاً بك مجدداً! ✅\n\nاستخدم الأزرار أو الأوامر للتفاعل مع البوت."
-    START_WELCOME = "أهلاً بك في البوت! 👋\n\nيجب عليك إتمام خطوات بسيطة للتحقق أولاً."
-    WEB_VERIFY_PROMPT = "خطوة ممتازة! للتحقق من أنك لا تستخدم نفس الجهاز عدة مرات، الرجاء الضغط على الزر أدناه."
+    START_WELCOME = "أهلاً بك في البوت! 👋\n\nللبدء، نحتاج للتحقق من جهازك. الرجاء الضغط على الزر أدناه."
+    WEB_VERIFY_PROMPT = "للتحقق من أنك لا تستخدم نفس الجهاز عدة مرات، الرجاء الضغط على الزر أدناه."
     JOIN_PROMPT = "ممتاز! الخطوة الأخيرة هي الانضمام إلى قناتنا. انضم ثم اضغط على الزر أدناه."
     JOIN_SUCCESS = "تهانينا! لقد تم التحقق منك بنجاح."
     JOIN_FAIL = "❌ لم تنضم بعد. الرجاء الانضمام إلى القناة ثم حاول مرة أخرى."
@@ -110,9 +108,9 @@ class Messages:
     ADMIN_WELCOME = "👑 أهلاً بك في لوحة تحكم المالك."
     INVALID_INPUT = "إدخال غير صالح. الرجاء المحاولة مرة أخرى."
     REFERRAL_ABUSE_DEVICE_USED = "تم اكتشاف إساءة استخدام لنظام الإحالة. تم حظر هذه الإحالة لأن هذا الجهاز تم استخدامه سابقاً للتسجيل."
-    REFERRAL_ABUSE_REFERRER_LIMIT = "عذراً، لقد وصل الداعي إلى الحد الأقصى من الدعوات المسموح بها."
-    MATH_CORRECT = "إجابة صحيحة! لننتقل للخطوة التالية."
+    REFERRAL_EXISTING_MEMBER = "💡 تنبيه: المستخدم الذي دعوته عضو بالفعل في القناة. سيتم احتساب هذه الإحالة كإحالة وهمية."
 
+    
 # --- الاتصال بقاعدة البيانات (Supabase) ---
 try:
     supabase: Client = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
@@ -185,33 +183,24 @@ async def get_referrer(referred_id: int) -> Optional[int]:
     except Exception:
         return None
 
-async def add_referral_mapping(referred_id: int, referrer_id: int, device_id: str) -> Tuple[bool, str]:
-    """Checks for device ID and referrer limit abuse, then adds the referral mapping."""
+async def add_referral_mapping(referred_id: int, referrer_id: int, device_id: str) -> bool:
+    """Checks only for device ID abuse and adds the referral mapping."""
     try:
-        # Check 1: Has this device already been used?
+        # Check if this device ID has already been used.
         device_check_res = await run_sync_db(
             lambda: supabase.table('referrals').select("device_id").eq('device_id', device_id).limit(1).execute()
         )
         if device_check_res.data:
             logger.warning(f"Abuse detected: Device ID {device_id} has already been used. Blocking user {referred_id}.")
-            return False, "DEVICE_USED"
+            return False
 
-        # Check 2: Has the referrer reached their invitation limit?
-        referrer_check_res = await run_sync_db(
-            lambda: supabase.table('referrals').select('referrer_user_id', count='exact').eq('referrer_user_id', referrer_id).execute()
-        )
-        if referrer_check_res.count >= Config.REFERRER_INVITE_LIMIT:
-            logger.warning(f"Abuse detected: Referrer {referrer_id} has reached their limit of {Config.REFERRER_INVITE_LIMIT}. Blocking for new user {referred_id}.")
-            return False, "REFERRER_LIMIT"
-
-        # All checks passed, add the new referral.
+        # If not found, add the new referral.
         data = {'referred_user_id': referred_id, 'referrer_user_id': referrer_id, 'device_id': device_id}
         await run_sync_db(lambda: supabase.table('referrals').upsert(data, on_conflict='referred_user_id').execute())
-        return True, "SUCCESS"
-
+        return True
     except Exception as e:
-        logger.error(f"DB_ERROR: Adding referral map for {referred_id}: {e}")
-        return False, "DB_ERROR"
+        logger.error(f"DB_ERROR: Adding referral map for {referred_id} with device ID {device_id}: {e}")
+        return False
 
 async def reset_all_referrals_in_db() -> None:
     try:
@@ -306,7 +295,7 @@ def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏆 أفضل 5 متسابقين", callback_data=Callback.TOP_5.value)],
     ]
     if user_id in Config.BOT_OWNER_IDS:
-        keyboard.append([InlineKeyboardButton("👑 لوحة تحكم المالك 👑", callback_data=Callback.ADMIN_PANEL.value)])
+        keyboard.append([InlineKeyboardButton("👑 لوحة تحكم المالك �", callback_data=Callback.ADMIN_PANEL.value)])
     return InlineKeyboardMarkup(keyboard)
 
 def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
@@ -356,10 +345,6 @@ async def is_user_in_channel(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
         logger.error(f"An unexpected error occurred while checking membership for {user_id}: {e}")
         return False
 
-def generate_math_question() -> Tuple[str, int]:
-    num1, num2 = random.randint(1, 10), random.randint(1, 10)
-    return f"{num1} + {num2}", num1 + num2
-
 # --- معالجات الأوامر (Command Handlers) ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.message or update.effective_chat.type != Chat.PRIVATE:
@@ -376,6 +361,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not db_user:
         await upsert_user_in_db({'user_id': user_id, 'full_name': user.full_name, 'username': user.username, 'total_real': 0, 'total_fake': 0, 'is_verified': False})
 
+    # NEW: Check if the user is already a member of the channel at the start
+    context.user_data['was_already_member'] = await is_user_in_channel(user_id, context)
+    if context.user_data['was_already_member']:
+        logger.info(f"User {user_id} was already a member of the channel upon starting.")
+
     args = context.args
     if args:
         try:
@@ -384,9 +374,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 context.user_data['referrer_id'] = referrer_id
         except (ValueError, IndexError):
             pass
-            
-    await update.message.reply_text(Messages.START_WELCOME)
-    await ask_math_question(update, context)
+    
+    # Simplified flow: Go directly to web app verification
+    await update.message.reply_text(Messages.START_WELCOME, reply_markup=ReplyKeyboardRemove())
+    await ask_web_verification(update.message, context)
 
 async def my_referrals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message: return
@@ -412,11 +403,6 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     msg = await update.message.reply_text(Messages.LOADING)
     text = await get_top_5_text(user_id, context)
     await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu_keyboard(user_id), disable_web_page_preview=True)
-
-async def ask_math_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    question, answer = generate_math_question()
-    context.user_data['math_answer'] = answer
-    await update.message.reply_text(f"للتحقق، ما هو ناتج {question}؟")
     
 async def ask_web_verification(message: Message, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a message with a Reply Keyboard button to open the web app."""
@@ -433,33 +419,6 @@ async def ask_web_verification(message: Message, context: ContextTypes.DEFAULT_T
     )
 
 # --- معالجات الرسائل والمدخلات (Input Handlers) ---
-async def handle_verification_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_user or not update.message or update.effective_chat.type != Chat.PRIVATE: return
-    
-    user_id = update.effective_user.id
-    
-    if user_id in Config.BOT_OWNER_IDS and context.user_data.get('state'):
-        await handle_admin_messages(update, context)
-        return
-        
-    db_user = await get_user_from_db(user_id)
-    if db_user and db_user.get('is_verified'):
-        await update.message.reply_text(Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(user_id))
-        return
-
-    if 'math_answer' in context.user_data:
-        try:
-            if int(update.message.text) == context.user_data['math_answer']:
-                del context.user_data['math_answer']
-                context.user_data['state'] = State.AWAITING_WEB_APP_VERIFICATION
-                await update.message.reply_text(Messages.MATH_CORRECT, reply_markup=ReplyKeyboardRemove())
-                await ask_web_verification(update.message, context)
-            else:
-                await update.message.reply_text("إجابة خاطئة. حاول مرة اخرى.")
-                await ask_math_question(update, context)
-        except (ValueError, TypeError):
-            await update.message.reply_text("من فضلك أدخل رقماً صحيحاً كإجابة.")
-
 async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles data sent from the web app using a device ID."""
     if not update.effective_user or not update.message or not update.message.web_app_data:
@@ -477,20 +436,13 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     referrer_id = context.user_data.get('referrer_id')
     if referrer_id and not await get_referrer(user_id):
-        is_allowed, reason_key = await add_referral_mapping(user_id, referrer_id, device_id)
+        is_allowed = await add_referral_mapping(user_id, referrer_id, device_id)
         
         if is_allowed:
             await modify_referral_count(user_id=referrer_id, fake_delta=1)
-            logger.info(f"Referral mapping for {user_id} by {referrer_id} successful with device_id {device_id}.")
+            logger.info(f"Referral mapping for {user_id} by {referrer_id} successful.")
         else:
-            if reason_key == "DEVICE_USED":
-                abuse_message = Messages.REFERRAL_ABUSE_DEVICE_USED
-            elif reason_key == "REFERRER_LIMIT":
-                abuse_message = Messages.REFERRAL_ABUSE_REFERRER_LIMIT
-            else:
-                abuse_message = Messages.GENERIC_ERROR
-            
-            await update.message.reply_text(abuse_message, reply_markup=ReplyKeyboardRemove())
+            await update.message.reply_text(Messages.REFERRAL_ABUSE_DEVICE_USED, reply_markup=ReplyKeyboardRemove())
             return
 
     phone_button = [[KeyboardButton("اضغط هنا لمشاركة رقم هاتفك", request_contact=True)]]
@@ -518,7 +470,6 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(Messages.JOIN_PROMPT, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.message.reply_text("عذراً، هذا البوت مخصص فقط للمستخدمين من الدول العربية. رقمك غير مدعوم.", reply_markup=ReplyKeyboardRemove())
-        context.user_data['state'] = State.AWAITING_WEB_APP_VERIFICATION
         await ask_web_verification(update.message, context)
 
 async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -531,17 +482,23 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
             await upsert_user_in_db({'user_id': user.id, 'is_verified': True, 'full_name': user.full_name, 'username': user.username})
             referrer_id = await get_referrer(user.id)
             if referrer_id:
+                was_already_member = context.user_data.get('was_already_member', False)
                 try:
-                    updated_referrer = await modify_referral_count(user_id=referrer_id, real_delta=1, fake_delta=-1)
-                    if updated_referrer:
-                        new_real_count = updated_referrer.get('total_real', 0)
-                        mention = await get_user_mention(user.id, context)
-                        await context.bot.send_message(
-                            chat_id=referrer_id,
-                            text=f"🎉 تهانينا! لقد انضم مستخدم جديد ({mention}) عن طريق رابطك.\n\n"
-                                 f"رصيدك المحدث هو: *{new_real_count}* إحالة حقيقية.",
-                            parse_mode=ParseMode.MARKDOWN
-                        )
+                    if was_already_member:
+                        # User was already in the channel, send notification but don't change points
+                        await context.bot.send_message(chat_id=referrer_id, text=Messages.REFERRAL_EXISTING_MEMBER)
+                    else:
+                        # This is a new, valid join. Convert fake point to real.
+                        updated_referrer = await modify_referral_count(user_id=referrer_id, real_delta=1, fake_delta=-1)
+                        if updated_referrer:
+                            new_real_count = updated_referrer.get('total_real', 0)
+                            mention = await get_user_mention(user.id, context)
+                            await context.bot.send_message(
+                                chat_id=referrer_id,
+                                text=f"🎉 تهانينا! لقد انضم مستخدم جديد ({mention}) عن طريق رابطك.\n\n"
+                                     f"رصيدك المحدث هو: *{new_real_count}* إحالة حقيقية.",
+                                parse_mode=ParseMode.MARKDOWN
+                            )
                 except TelegramError as e:
                     logger.warning(f"Could not send notification to referrer {referrer_id}: {e}")
         await query.edit_message_text(Messages.JOIN_SUCCESS)
@@ -751,6 +708,10 @@ async def handle_data_migration(query: CallbackQuery, context: ContextTypes.DEFA
 
 # --- معالج رسائل المالك (Admin Message Handler) ---
 async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # This handler is now only for admin state-based messages
+    if not update.effective_user or update.effective_user.id not in Config.BOT_OWNER_IDS:
+        return
+
     state = context.user_data.get('state')
     if not state or not update.message or not update.message.text: return
     text = update.message.text
@@ -915,7 +876,8 @@ def main() -> None:
     private_chat_filter = filters.ChatType.PRIVATE
     application.add_handler(MessageHandler(filters.CONTACT & private_chat_filter, handle_contact), group=2)
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler), group=2)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_chat_filter, handle_verification_text), group=2)
+    # This handler now only manages admin inputs, as the user verification flow no longer uses it.
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_chat_filter, handle_admin_messages), group=2)
     
     logger.info("Bot is starting...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
