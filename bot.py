@@ -71,8 +71,8 @@ class State(Enum):
     AWAITING_EDIT_AMOUNT = auto()
     AWAITING_WINNER_THRESHOLD = auto()
     AWAITING_BROADCAST_MESSAGE = auto()
-    AWAITING_CAPTCHA_VERIFICATION = auto()
     AWAITING_WEB_APP_VERIFICATION = auto()
+    AWAITING_UNIVERSAL_BROADCAST_MESSAGE = auto()
 
 
 # --- تعريفات أزرار الكيبورد (Callback) ---
@@ -96,7 +96,10 @@ class Callback(Enum):
     ADMIN_BROADCAST = "admin_broadcast"
     ADMIN_RESET_ALL = "admin_reset_all"
     ADMIN_RESET_CONFIRM = "admin_reset_confirm"
-    CAPTCHA_BUTTON = "captcha_button"
+    ADMIN_FORMAT_BOT = "admin_format_bot"
+    ADMIN_FORMAT_CONFIRM = "admin_format_confirm"
+    ADMIN_FORCE_REVERIFICATION = "admin_force_reverification"
+    ADMIN_UNIVERSAL_BROADCAST = "admin_universal_broadcast"
 
 # --- رسائل البوت (Messages) ---
 class Messages:
@@ -112,6 +115,7 @@ class Messages:
     INVALID_INPUT = "إدخال غير صالح. الرجاء المحاولة مرة أخرى."
     VPN_DETECTED = "تم اكتشاف استخدامك لـ VPN. يرجى تعطيله والمحاولة مرة أخرى."
     REFERRAL_ABUSE_DETECTED = "تم اكتشاف إساءة استخدام لنظام الإحالة. تم حظر هذه الإحالة لأن الجهاز تم استخدامه سابقاً."
+    MATH_CORRECT = "إجابة صحيحة! لننتقل للخطوة التالية."
 
 # --- الاتصال بقاعدة البيانات (Supabase) ---
 try:
@@ -137,7 +141,6 @@ async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
         chat = await context.bot.get_chat(user_id)
         full_name = clean_name_for_markdown(chat.full_name)
         mention = f"[{full_name}](tg://user?id={user_id})"
-        
         cache[user_id] = {'mention': mention, 'timestamp': current_time}
     except Exception:
         db_user_info = await get_user_from_db(user_id)
@@ -146,7 +149,6 @@ async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
             full_name = clean_name_for_markdown(db_user_info.get("full_name", f"User {user_id}"))
         mention = f"[{full_name}](tg://user?id={user_id})"
         cache[user_id] = {'mention': mention, 'timestamp': current_time}
-
     return mention
 
 async def is_vpn(ip_address: str) -> bool:
@@ -178,13 +180,6 @@ async def upsert_user_in_db(user_data: Dict[str, Any]) -> None:
         await run_sync_db(lambda: supabase.table('users').upsert(user_data, on_conflict='user_id').execute())
     except Exception as e:
         logger.error(f"DB_ERROR: Upserting user {user_data.get('user_id')}: {e}")
-
-async def upsert_users_batch(users_data: List[Dict[str, Any]]) -> None:
-    if not users_data: return
-    try:
-        await run_sync_db(lambda: supabase.table('users').upsert(users_data).execute())
-    except Exception as e:
-        logger.error(f"DB_ERROR: Batch upserting users: {e}")
 
 async def get_all_users_from_db() -> List[Dict[str, Any]]:
     try:
@@ -222,7 +217,6 @@ async def add_referral_mapping(referred_id: int, referrer_id: int, ip_address: s
         logger.error(f"DB_ERROR: Adding referral map for {referred_id} by {referrer_id}: {e}")
         return False
 
-
 async def reset_all_referrals_in_db() -> None:
     try:
         await run_sync_db(lambda: supabase.table('referrals').delete().gt('referred_user_id', 0).execute())
@@ -232,33 +226,45 @@ async def reset_all_referrals_in_db() -> None:
     except Exception as e:
         logger.error(f"DB_ERROR: Resetting all referrals: {e}")
 
+async def format_bot_in_db() -> None:
+    try:
+        await run_sync_db(lambda: supabase.table('referrals').delete().gt('referred_user_id', 0).execute())
+        logger.info("All referrals have been deleted from the database.")
+        await run_sync_db(lambda: supabase.table('users').delete().gt('user_id', 0).execute())
+        logger.info("All users have been deleted from the database.")
+        logger.info("BOT HAS BEEN FORMATTED.")
+    except Exception as e:
+        logger.error(f"DB_ERROR: Formatting bot: {e}")
+
+async def unverify_all_users_in_db() -> None:
+    try:
+        update_payload = {"is_verified": False}
+        await run_sync_db(lambda: supabase.table('users').update(update_payload).gt('user_id', 0).execute())
+        logger.info("All users have been successfully marked as unverified.")
+    except Exception as e:
+        logger.error(f"DB_ERROR: Failed while un-verifying all users: {e}")
+
 # --- دوال المنطق الأساسي (Core Logic) ---
 
 async def modify_referral_count(user_id: int, real_delta: int = 0, fake_delta: int = 0) -> Optional[Dict[str, Any]]:
     if not user_id: return None
-    
     user_data = await get_user_from_db(user_id)
     if not user_data:
         logger.warning(f"Attempted to modify counts for non-existent user {user_id}")
         return None
-        
     current_real = int(user_data.get('total_real', 0) or 0)
     current_fake = int(user_data.get('total_fake', 0) or 0)
-    
     new_real = max(0, current_real + real_delta)
     new_fake = max(0, current_fake + fake_delta)
-    
     update_payload = {'user_id': user_id, 'total_real': new_real, 'total_fake': new_fake}
     await upsert_user_in_db(update_payload)
     logger.info(f"Updated counts for {user_id}: Real {current_real}->{new_real}, Fake {current_fake}->{new_fake}")
-    
     return await get_user_from_db(user_id)
 
 # --- دوال العرض (Display Functions) ---
 
 def get_referral_stats_text(user_info: Optional[Dict[str, Any]]) -> str:
     if not user_info: return "لا توجد لديك بيانات بعد. حاول مرة أخرى."
-    
     total_real = int(user_info.get("total_real", 0) or 0)
     total_fake = int(user_info.get("total_fake", 0) or 0)
     return f"📊 *إحصائيات إحالاتك:*\n\n✅ الإحالات الحقيقية: *{total_real}*\n⏳ الإحالات الوهمية: *{total_fake}*"
@@ -271,10 +277,8 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
     all_users = await get_all_users_from_db()
     if not all_users:
         return msg + "لم يصل أحد إلى القائمة بعد. كن أنت الأول!\n\n---\n*ترتيبك الشخصي:*\nلا يمكن عرض ترتيبك حالياً."
-
     full_sorted_list = sorted(all_users, key=lambda u: u.get('total_real', 0), reverse=True)
     top_5_users = [u for u in full_sorted_list if u.get('total_real', 0) > 0][:5]
-
     if not top_5_users:
         msg += "لم يصل أحد إلى القائمة بعد. كن أنت الأول!\n"
     else:
@@ -283,7 +287,6 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
             mention = mentions[i]
             count = u_info.get('total_real', 0)
             msg += f"{i+1}. {mention} - *{count}* إحالة\n"
-    
     msg += "\n---\n*ترتيبك الشخصي:*\n"
     try:
         user_index = next((i for i, u in enumerate(full_sorted_list) if u.get('user_id') == user_id), -1)
@@ -293,56 +296,11 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
             my_referrals = full_sorted_list[user_index].get('total_real', 0)
         else:
             rank_str = "غير مصنف"
-        
         msg += f"🎖️ ترتيبك: *{rank_str}*\n✅ رصيدك: *{my_referrals}* إحالة حقيقية."
     except Exception as e:
         logger.error(f"Error getting user rank for {user_id}: {e}")
         msg += "لا يمكن عرض ترتيبك حالياً."
-        
     return msg
-
-async def get_paginated_report(page: int, report_type: str, context: ContextTypes.DEFAULT_TYPE) -> Tuple[str, InlineKeyboardMarkup]:
-    all_users = await get_all_users_from_db()
-    if not all_users:
-        return "لا يوجد أي مستخدمين في هذا التقرير حالياً.", get_admin_panel_keyboard()
-
-    if report_type == 'real':
-        filtered_users = [u for u in all_users if u.get('total_real', 0) > 0]
-        filtered_users.sort(key=lambda u: u.get('total_real', 0), reverse=True)
-        title = "✅ *تقرير الإحالات الحقيقية*"
-        count_key = 'total_real'
-    else: # fake
-        filtered_users = [u for u in all_users if u.get('total_fake', 0) > 0]
-        filtered_users.sort(key=lambda u: u.get('total_fake', 0), reverse=True)
-        title = "⏳ *تقرير الإحالات الوهمية*"
-        count_key = 'total_fake'
-
-    if not filtered_users:
-        return f"لا يوجد أي مستخدمين في هذا التقرير ({report_type}) حالياً.", get_admin_panel_keyboard()
-
-    start_index = (page - 1) * Config.USERS_PER_PAGE
-    end_index = start_index + Config.USERS_PER_PAGE
-    page_users = filtered_users[start_index:end_index]
-    total_pages = math.ceil(len(filtered_users) / Config.USERS_PER_PAGE)
-
-    report = f"{title} (صفحة {page} من {total_pages}):\n\n"
-    
-    mentions = await asyncio.gather(*[get_user_mention(u['user_id'], context) for u in page_users])
-    
-    for i, u_data in enumerate(page_users):
-        mention = mentions[i]
-        count = u_data.get(count_key, 0)
-        report += f"• {mention} - *{count}*\n"
-        
-    nav_buttons = []
-    callback_prefix = f"{Callback.REPORT_PAGE.value}{report_type}_page_"
-    if page > 1:
-        nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"{callback_prefix}{page-1}"))
-    if page < total_pages:
-        nav_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data=f"{callback_prefix}{page+1}"))
-    
-    keyboard = [nav_buttons, [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data=Callback.ADMIN_PANEL.value)]]
-    return report, InlineKeyboardMarkup(keyboard)
 
 # --- دوال إنشاء الكيبورد (Keyboard Functions) ---
 def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -360,9 +318,12 @@ def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 تقرير حقيقي", callback_data=f"{Callback.REPORT_PAGE.value}real_page_1"), InlineKeyboardButton("⏳ تقرير وهمي", callback_data=f"{Callback.REPORT_PAGE.value}fake_page_1")],
         [InlineKeyboardButton("👥 عدد المستخدمين", callback_data=Callback.ADMIN_USER_COUNT.value), InlineKeyboardButton("🏆 اختيار فائز", callback_data=Callback.PICK_WINNER.value)],
         [InlineKeyboardButton("Booo 👾 (تعديل يدوي)", callback_data=Callback.ADMIN_BOOO_MENU.value)],
-        [InlineKeyboardButton("📢 إذاعة للكل", callback_data=Callback.ADMIN_BROADCAST.value)],
+        [InlineKeyboardButton("📢 إذاعة للموثقين", callback_data=Callback.ADMIN_BROADCAST.value)],
+        [InlineKeyboardButton("📢 إذاعة للكل", callback_data=Callback.ADMIN_UNIVERSAL_BROADCAST.value)],
+        [InlineKeyboardButton("🔄 فرض إعادة التحقق", callback_data=Callback.ADMIN_FORCE_REVERIFICATION.value)],
         [InlineKeyboardButton("⚠️ تصفير كل الإحالات", callback_data=Callback.ADMIN_RESET_ALL.value)],
         [InlineKeyboardButton("⚙️ ترحيل وإعادة حساب البيانات", callback_data=Callback.DATA_MIGRATION.value)],
+        [InlineKeyboardButton("💀 فورمات البوت (حذف كل شيء)", callback_data=Callback.ADMIN_FORMAT_BOT.value)],
         [InlineKeyboardButton("⬅️ العودة للقائمة الرئيسية", callback_data=Callback.MAIN_MENU.value)],
     ])
 
@@ -385,11 +346,6 @@ def get_reset_confirmation_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ نعم، قم بالتصفير", callback_data=Callback.ADMIN_RESET_CONFIRM.value)],
         [InlineKeyboardButton("❌ لا، الغِ الأمر", callback_data=Callback.ADMIN_PANEL.value)]
-    ])
-
-def get_captcha_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🤖 אני לא רובוט (I'm not a robot)", callback_data=Callback.CAPTCHA_BUTTON.value)]
     ])
 
 # --- دوال التحقق من الانضمام والتحقق (Verification Handlers) ---
@@ -422,9 +378,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if not db_user:
-        await upsert_user_in_db({'user_id': user_id, 'full_name': user.full_name, 'username': user.username, 'total_real': 0, 'total_fake': 0})
+        await upsert_user_in_db({'user_id': user_id, 'full_name': user.full_name, 'username': user.username, 'total_real': 0, 'total_fake': 0, 'is_verified': False})
 
-    # نخزن ID المُحيل (إن وجد) لمعالجته بعد التحقق من تطبيق الويب
     args = context.args
     if args:
         try:
@@ -465,10 +420,10 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def ask_math_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     question, answer = generate_math_question()
     context.user_data['math_answer'] = answer
-    await update.message.reply_text(f"ما هو ناتج {question}؟")
+    await update.message.reply_text(f"للتحقق، ما هو ناتج {question}؟")
     
 async def ask_web_verification(message: Message, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يرسل رسالة مع زر لفتح تطبيق الويب."""
+    """Sends a message with a Reply Keyboard button to open the web app."""
     keyboard = ReplyKeyboardMarkup.from_button(
         KeyboardButton(
             text="🔒 اضغط هنا للتحقق من جهازك",
@@ -500,28 +455,17 @@ async def handle_verification_text(update: Update, context: ContextTypes.DEFAULT
         try:
             if int(update.message.text) == context.user_data['math_answer']:
                 del context.user_data['math_answer']
-                context.user_data['state'] = State.AWAITING_CAPTCHA_VERIFICATION
-                await update.message.reply_text(
-                    "إجابة صحيحة! يرجى التأكيد أنك لست روبوتًا.",
-                    reply_markup=get_captcha_keyboard()
-                )
+                context.user_data['state'] = State.AWAITING_WEB_APP_VERIFICATION
+                await update.message.reply_text(Messages.MATH_CORRECT, reply_markup=ReplyKeyboardRemove())
+                await ask_web_verification(update.message, context)
             else:
                 await update.message.reply_text("إجابة خاطئة. حاول مرة اخرى.")
                 await ask_math_question(update, context)
         except (ValueError, TypeError):
             await update.message.reply_text("من فضلك أدخل رقماً صحيحاً كإجابة.")
 
-async def handle_captcha_verification(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if context.user_data.get('state') != State.AWAITING_CAPTCHA_VERIFICATION:
-        await query.answer("This button is not for you.", show_alert=True)
-        return
-
-    context.user_data['state'] = State.AWAITING_WEB_APP_VERIFICATION
-    await query.message.delete() # ننظف رسالة الكابتشا
-    await ask_web_verification(query.message, context) # نطلب التحقق عبر الويب
-    
 async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يعالج البيانات المرسلة من تطبيق الويب."""
+    """Handles data sent from the web app."""
     if not update.effective_user or not update.message or not update.message.web_app_data:
         return
         
@@ -533,11 +477,9 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(Messages.GENERIC_ERROR + " (لم يتم استلام IP)", reply_markup=ReplyKeyboardRemove())
         return
 
-    # نخزن الـ IP الحقيقي
     context.bot_data[f'ip_{user_id}'] = ip_address
     logger.info(f"Received IP {ip_address} for user {user_id} from Web App.")
 
-    # الآن، نعالج منطق الإحالة باستخدام الـ IP الحقيقي
     referrer_id = context.user_data.get('referrer_id')
     if referrer_id and not await get_referrer(user_id):
         if await add_referral_mapping(user_id, referrer_id, ip_address):
@@ -545,20 +487,17 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             logger.info(f"Referral mapping for {user_id} by {referrer_id} successful with IP {ip_address}.")
         else:
             await update.message.reply_text(Messages.REFERRAL_ABUSE_DETECTED, reply_markup=ReplyKeyboardRemove())
-            return # نوقف عملية التحقق
+            return
 
-    # فحص الـ VPN
     if await is_vpn(ip_address):
         await update.message.reply_text(Messages.VPN_DETECTED, reply_markup=ReplyKeyboardRemove())
         return
 
-    # ننتقل للخطوة التالية: طلب رقم الهاتف
     phone_button = [[KeyboardButton("اضغط هنا لمشاركة رقم هاتفك", request_contact=True)]]
     await update.message.reply_text(
         "تم التحقق من جهازك بنجاح! الآن، من فضلك شارك رقم هاتفك لإكمال العملية.",
         reply_markup=ReplyKeyboardMarkup(phone_button, resize_keyboard=True, one_time_keyboard=True)
     )
-
 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.contact or update.effective_chat.type != Chat.PRIVATE:
@@ -580,8 +519,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         await update.message.reply_text("عذراً، هذا البوت مخصص فقط للمستخدمين من الدول العربية. رقمك غير مدعوم.", reply_markup=ReplyKeyboardRemove())
         context.user_data['state'] = State.AWAITING_WEB_APP_VERIFICATION
-        await ask_web_verification(update.message, context) # نطلب التحقق مرة أخرى إذا فشل
-
+        await ask_web_verification(update.message, context)
 
 async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = query.from_user
@@ -589,10 +527,8 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
     
     if await is_user_in_channel(user.id, context):
         db_user = await get_user_from_db(user.id)
-
         if not db_user or not db_user.get('is_verified'):
             await upsert_user_in_db({'user_id': user.id, 'is_verified': True, 'full_name': user.full_name, 'username': user.username})
-            
             referrer_id = await get_referrer(user.id)
             if referrer_id:
                 try:
@@ -608,10 +544,8 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
                         )
                 except TelegramError as e:
                     logger.warning(f"Could not send notification to referrer {referrer_id}: {e}")
-
         await query.edit_message_text(Messages.JOIN_SUCCESS)
         await query.message.reply_text(Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(user.id))
-    
     else:
         await query.answer(text=Messages.JOIN_FAIL, show_alert=True)
         keyboard = [
@@ -686,6 +620,38 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
         f"فشل الإرسال إلى: {failed_count} مستخدم"
     )
 
+async def handle_admin_universal_broadcast(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data['state'] = State.AWAITING_UNIVERSAL_BROADCAST_MESSAGE
+    await query.edit_message_text(text="أرسل الآن الرسالة التي تريد إذاعتها لجميع المستخدمين المسجلين (موثقين وغير موثقين).")
+
+async def handle_universal_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message: return
+    context.user_data['state'] = None
+    await update.message.reply_text("⏳ جاري إرسال الإذاعة الشاملة لجميع المستخدمين...")
+    all_users = await get_all_users_from_db()
+    
+    sent_count = 0
+    failed_count = 0
+
+    for user in all_users:
+        try:
+            await context.bot.copy_message(
+                chat_id=user['user_id'],
+                from_chat_id=update.effective_chat.id,
+                message_id=update.message.message_id
+            )
+            sent_count += 1
+        except TelegramError as e:
+            logger.error(f"Failed to send universal broadcast to {user['user_id']}: {e}")
+            failed_count += 1
+        await asyncio.sleep(0.1)
+
+    await update.message.reply_text(
+        f"✅ اكتملت الإذاعة الشاملة!\n\n"
+        f"✔️ تم الإرسال بنجاح إلى: {sent_count} مستخدم\n"
+        f"❌ فشل الإرسال إلى: {failed_count} مستخدم"
+    )
+
 async def handle_admin_reset_all(query: CallbackQuery) -> None:
     await query.edit_message_text(
         text="⚠️ *تأكيد الإجراء* ⚠️\n\nهل أنت متأكد من أنك تريد تصفير *جميع* الإحالات؟ هذا سيحذف سجلات الإحالات و يصفر العدادات.",
@@ -698,38 +664,43 @@ async def handle_admin_reset_confirm(query: CallbackQuery) -> None:
     await reset_all_referrals_in_db()
     await query.edit_message_text(text="✅ تم تصفير جميع إحصائيات الإحالات بنجاح.", reply_markup=get_admin_panel_keyboard())
 
+async def handle_admin_format_bot(query: CallbackQuery) -> None:
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("‼️ نعم، قم بحذف كل شيء ‼️", callback_data=Callback.ADMIN_FORMAT_CONFIRM.value)],
+        [InlineKeyboardButton("❌ لا، إلغاء الأمر", callback_data=Callback.ADMIN_PANEL.value)]
+    ])
+    await query.edit_message_text(
+        text="⚠️⚠️⚠️ *تحذير خطير جداً* ⚠️⚠️⚠️\n\n"
+             "أنت على وشك حذف **جميع بيانات البوت بشكل نهائي**.\n"
+             "سيتم حذف:\n"
+             "- جميع المستخدمين المسجلين.\n"
+             "- جميع الإحالات (الحقيقية والوهمية).\n"
+             "- كل شيء حرفياً.\n\n"
+             "**هذا الإجراء لا يمكن التراجع عنه.** هل أنت متأكد تماماً؟",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard
+    )
+
+async def handle_admin_format_confirm(query: CallbackQuery) -> None:
+    await query.edit_message_text(text="⏳ جاري تنفيذ الفورمات...")
+    await format_bot_in_db()
+    await query.edit_message_text(text="✅ تم عمل فورمات للبوت بنجاح. لقد عاد إلى حالة المصنع.", reply_markup=get_admin_panel_keyboard())
+
+async def handle_force_reverification(query: CallbackQuery) -> None:
+    await query.edit_message_text(text="⏳ جاري إلغاء تحقق جميع المستخدمين...")
+    await unverify_all_users_in_db()
+    await query.edit_message_text(text="✅ تم إلغاء تحقق جميع المستخدمين بنجاح. سيُطلب منهم إتمام التحقق مرة أخرى عند استخدام الأمر /start.", reply_markup=get_admin_panel_keyboard())
 
 async def handle_booo_menu(query: CallbackQuery) -> None:
     await query.edit_message_text(text="👾 *Booo*\n\nاختر الأداة التي تريد استخدامها:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_booo_menu_keyboard())
 
 async def handle_user_edit_menu(query: CallbackQuery) -> None:
-    await query.edit_message_text(text="� *تعديل إحصائيات المستخدم*\n\nاختر الإجراء المطلوب:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_user_edit_keyboard())
+    await query.edit_message_text(text="👤 *تعديل إحصائيات المستخدم*\n\nاختر الإجراء المطلوب:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_user_edit_keyboard())
 
 async def handle_user_edit_action(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['state'] = State.AWAITING_EDIT_USER_ID
     context.user_data['action_type'] = query.data
     await query.edit_message_text(text="الرجاء إرسال الـ ID الرقمي للمستخدم لتنفيذ الإجراء.")
-
-async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        data_parts = query.data.split('_')
-        if not (len(data_parts) == 4 and data_parts[0] == 'report' and data_parts[2] == 'page'):
-            return
-        
-        report_type = data_parts[1]
-        page = int(data_parts[3])
-        
-        await query.edit_message_text(Messages.LOADING)
-        text, keyboard = await get_paginated_report(page, report_type, context)
-        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
-
-    except BadRequest as e:
-        if "message is not modified" in str(e).lower():
-            await query.answer()
-        else: raise e
-    except (ValueError, IndexError) as e:
-        logger.error(f"Error in report pagination: {e}")
-        await query.answer("خطأ في البيانات.", show_alert=True)
 
 async def handle_data_migration(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("⏳ **بدء عملية إعادة حساب وترحيل البيانات...**\nهذه العملية ستقوم بحساب جميع الإحالات من جديد. لا تقم بتشغيلها مرة أخرى.", parse_mode=ParseMode.MARKDOWN)
@@ -778,38 +749,6 @@ async def handle_data_migration(query: CallbackQuery, context: ContextTypes.DEFA
         await query.edit_message_text(f"❌ فشلت عملية الترحيل.\nالرجاء التأكد من أن الأعمدة `total_real` و `total_fake` موجودة في جدول `users`.\n\nالخطأ الفني: `{e}`", 
                                       reply_markup=get_admin_panel_keyboard())
 
-# --- معالج الأزرار الرئيسي (Main Button Handler) ---
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if not query or not query.data: return
-    
-    try:
-        await query.answer()
-    except BadRequest as e:
-        if "Query is too old" in str(e):
-            logger.warning(f"Could not answer callback query {query.id}: {e}")
-            return
-        else:
-            raise
-    
-    action = query.data
-    if action == Callback.MAIN_MENU.value: await query.edit_message_text(text=Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(query.from_user.id))
-    elif action == Callback.MY_REFERRALS.value: await handle_button_press_my_referrals(query)
-    elif action == Callback.MY_LINK.value: await handle_button_press_link(query, context)
-    elif action == Callback.TOP_5.value: await handle_button_press_top5(query, context)
-    elif action == Callback.CONFIRM_JOIN.value: await handle_confirm_join(query, context)
-    elif action == Callback.ADMIN_PANEL.value: await handle_admin_panel(query)
-    elif action == Callback.ADMIN_USER_COUNT.value: await handle_admin_user_count(query)
-    elif action == Callback.ADMIN_BOOO_MENU.value: await handle_booo_menu(query)
-    elif action == Callback.ADMIN_USER_EDIT_MENU.value: await handle_user_edit_menu(query)
-    elif action == Callback.ADMIN_RESET_ALL.value: await handle_admin_reset_all(query)
-    elif action == Callback.ADMIN_RESET_CONFIRM.value: await handle_admin_reset_confirm(query)
-    elif action == Callback.DATA_MIGRATION.value: await handle_data_migration(query, context)
-    elif action == Callback.CAPTCHA_BUTTON.value: await handle_captcha_verification(query, context)
-    elif action == Callback.ADMIN_BROADCAST.value: await handle_admin_broadcast(query, context)
-    elif action in [c.value for c in [Callback.USER_ADD_REAL, Callback.USER_REMOVE_REAL, Callback.USER_ADD_FAKE, Callback.USER_REMOVE_FAKE]]: await handle_user_edit_action(query, context)
-    elif action.startswith(Callback.REPORT_PAGE.value): await handle_report_pagination(query, context)
-
 # --- معالج رسائل المالك (Admin Message Handler) ---
 async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     state = context.user_data.get('state')
@@ -818,6 +757,10 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
 
     if state == State.AWAITING_BROADCAST_MESSAGE:
         await handle_broadcast_message(update, context)
+        return
+
+    if state == State.AWAITING_UNIVERSAL_BROADCAST_MESSAGE:
+        await handle_universal_broadcast_message(update, context)
         return
 
     if state == State.AWAITING_EDIT_USER_ID:
@@ -921,6 +864,40 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
             except TelegramError as e:
                 logger.warning(f"Could not send leave notification to referrer {referrer_id}: {e}")
 
+# --- معالج الأزرار الرئيسي (Main Button Handler) ---
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.data: return
+    
+    try:
+        await query.answer()
+    except BadRequest as e:
+        if "Query is too old" in str(e):
+            logger.warning(f"Could not answer callback query {query.id}: {e}")
+            return
+        else:
+            raise
+    
+    action = query.data
+    if action == Callback.MAIN_MENU.value: await query.edit_message_text(text=Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(query.from_user.id))
+    elif action == Callback.MY_REFERRALS.value: await handle_button_press_my_referrals(query)
+    elif action == Callback.MY_LINK.value: await handle_button_press_link(query, context)
+    elif action == Callback.TOP_5.value: await handle_button_press_top5(query, context)
+    elif action == Callback.CONFIRM_JOIN.value: await handle_confirm_join(query, context)
+    elif action == Callback.ADMIN_PANEL.value: await handle_admin_panel(query)
+    elif action == Callback.ADMIN_USER_COUNT.value: await handle_admin_user_count(query)
+    elif action == Callback.ADMIN_BOOO_MENU.value: await handle_booo_menu(query)
+    elif action == Callback.ADMIN_USER_EDIT_MENU.value: await handle_user_edit_menu(query)
+    elif action == Callback.ADMIN_RESET_ALL.value: await handle_admin_reset_all(query)
+    elif action == Callback.ADMIN_RESET_CONFIRM.value: await handle_admin_reset_confirm(query)
+    elif action == Callback.DATA_MIGRATION.value: await handle_data_migration(query, context)
+    elif action == Callback.ADMIN_BROADCAST.value: await handle_admin_broadcast(query, context)
+    elif action == Callback.ADMIN_UNIVERSAL_BROADCAST.value: await handle_admin_universal_broadcast(query, context)
+    elif action == Callback.ADMIN_FORMAT_BOT.value: await handle_admin_format_bot(query)
+    elif action == Callback.ADMIN_FORMAT_CONFIRM.value: await handle_admin_format_confirm(query)
+    elif action == Callback.ADMIN_FORCE_REVERIFICATION.value: await handle_force_reverification(query)
+    elif action in [c.value for c in [Callback.USER_ADD_REAL, Callback.USER_REMOVE_REAL, Callback.USER_ADD_FAKE, Callback.USER_REMOVE_FAKE]]: await handle_user_edit_action(query, context)
+
 # --- الدالة الرئيسية (Main Function) ---
 def main() -> None:
     """بدء تشغيل البوت."""
@@ -937,7 +914,6 @@ def main() -> None:
 
     private_chat_filter = filters.ChatType.PRIVATE
     application.add_handler(MessageHandler(filters.CONTACT & private_chat_filter, handle_contact), group=2)
-    # معالج جديد لبيانات تطبيق الويب
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler), group=2)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_chat_filter, handle_verification_text), group=2)
     
