@@ -50,7 +50,7 @@ class Config:
     BOT_TOKEN = "7950170561:AAH5OtiK38BBhAnVofqxnLWRYbaZaIaKY4s"
     SUPABASE_URL = "https://jofxsqsgarvzolgphqjg.supabase.co"
     SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
-    WEB_APP_URL = "https://khaldonart.pythonanywhere.com" 
+    WEB_APP_URL = "https://khaldonart.pythonanywhere.com"
     CHANNEL_ID = -1002686156311
     CHANNEL_URL = "https://t.me/Ry_Hub"
     BOT_OWNER_IDS = {596472053, 7164133014, 1971453570}
@@ -84,7 +84,7 @@ class Callback(Enum):
     USER_REMOVE_REAL = "user_remove_real"
     USER_ADD_FAKE = "user_add_fake"
     USER_REMOVE_FAKE = "user_remove_fake"
-    REPORT_PAGE = "report_"
+    REPORT_PAGE = "report" # FIXED: Removed underscore
     DATA_MIGRATION = "data_migration"
     PICK_WINNER = "pick_winner"
     ADMIN_BROADCAST = "admin_broadcast"
@@ -94,7 +94,7 @@ class Callback(Enum):
     ADMIN_FORMAT_CONFIRM = "admin_format_confirm"
     ADMIN_FORCE_REVERIFICATION = "admin_force_reverification"
     ADMIN_UNIVERSAL_BROADCAST = "admin_universal_broadcast"
-    MY_REFERRALS_LOG = "my_referrals_log" # New Callback for referral log
+    MY_REFERRALS_LOG = "my_referrals_log"
 
 # --- رسائل البوت (Messages) ---
 class Messages:
@@ -112,7 +112,7 @@ class Messages:
     REFERRAL_EXISTING_MEMBER = "💡 تنبيه: المستخدم الذي دعوته عضو بالفعل في القناة. سيتم احتساب هذه الإحالة كإحالة وهمية."
     NO_REFERRALS_YET = "لم تقم بدعوة أي مستخدم بعد."
 
-    
+
 # --- الاتصال بقاعدة البيانات (Supabase) ---
 try:
     supabase: Client = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
@@ -185,36 +185,20 @@ async def get_referrer(referred_id: int) -> Optional[int]:
     except Exception:
         return None
 
-async def add_referral_mapping(referred_id: int, referrer_id: int, device_id: str) -> bool:
-    """Checks only for device ID abuse and adds the referral mapping."""
+async def add_referral_mapping_in_db(referred_id: int, referrer_id: Optional[int], device_id: str) -> None:
+    """
+    Just inserts or updates the referral mapping. 
+    All checks (like device uniqueness) should be done before calling this function.
+    """
     try:
-        device_check_res = await run_sync_db(
-            lambda: supabase.table('referrals').select('device_id', count='exact').eq('device_id', device_id).execute()
-        )
-        if device_check_res.count > 0:
-            logger.warning(f"Abuse detected: Device ID {device_id} has already been used. Count: {device_check_res.count}. Blocking user {referred_id}.")
-            return False
-
         data = {'referred_user_id': referred_id, 'referrer_user_id': referrer_id, 'device_id': device_id}
         await run_sync_db(lambda: supabase.table('referrals').upsert(data, on_conflict='referred_user_id').execute())
-        return True
     except Exception as e:
-        # Check if the error is due to the missing 'device_id' column
-        if 'column "device_id" does not exist' in str(e):
-            logger.warning("Column 'device_id' not found in 'referrals' table. Attempting to add it.")
-            try:
-                # This is a raw SQL command and might require admin privileges on your Supabase project
-                await run_sync_db(lambda: supabase.rpc('exec', {'sql': 'ALTER TABLE referrals ADD COLUMN device_id TEXT'}).execute())
-                logger.info("Successfully added 'device_id' column. Retrying the insert.")
-                # Retry the insertion after adding the column
-                await run_sync_db(lambda: supabase.table('referrals').upsert(data, on_conflict='referred_user_id').execute())
-                return True
-            except Exception as add_col_e:
-                logger.error(f"FATAL: Failed to add 'device_id' column and also failed to insert data. Error: {add_col_e}")
-                return False
+        if 'column "device_id" does not exist' in str(e).lower():
+             logger.critical(f"DATABASE SCHEMA ERROR: The 'referrals' table is missing the 'device_id' column. Please add it manually in your Supabase dashboard. It should be a TEXT column.")
         else:
             logger.error(f"DB_ERROR: Adding referral map for {referred_id} with device ID {device_id}: {e}")
-            return False
+
 
 async def get_my_referrals_details(user_id: int) -> Tuple[List[int], List[int]]:
     """Fetches the user IDs of real and fake referrals for a given user."""
@@ -291,7 +275,7 @@ def get_referral_stats_text(user_info: Optional[Dict[str, Any]]) -> str:
     if not user_info: return "لا توجد لديك بيانات بعد. حاول مرة أخرى."
     total_real = int(user_info.get("total_real", 0) or 0)
     total_fake = int(user_info.get("total_fake", 0) or 0)
-    return f"📊 *إحصائيات إحالاتك:*\n\n✅ الإحالات الحقيقية: *{total_real}*\n⏳ الإحالات الوهمية: *{total_fake}*"
+    return f"� *إحصائيات إحالاتك:*\n\n✅ الإحالات الحقيقية: *{total_real}*\n⏳ الإحالات الوهمية: *{total_fake}*"
 
 def get_referral_link_text(user_id: int, bot_username: str) -> str:
     return f"🔗 رابط الإحالة الخاص بك:\n`https://t.me/{bot_username}?start={user_id}`"
@@ -332,13 +316,15 @@ def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("إحصائياتي 📊", callback_data=Callback.MY_REFERRALS.value)],
         [InlineKeyboardButton("رابطي 🔗", callback_data=Callback.MY_LINK.value)],
         [InlineKeyboardButton("🏆 أفضل 5 متسابقين", callback_data=Callback.TOP_5.value)],
-        [InlineKeyboardButton("📜 سجل إحالاتي", callback_data=f"{Callback.MY_REFERRALS_LOG.value}_real_1")],
     ]
+    # FIXED: "My Referrals Log" button is now only visible to admins.
     if user_id in Config.BOT_OWNER_IDS:
+        keyboard.append([InlineKeyboardButton("📜 سجل إحالاتي", callback_data=f"{Callback.MY_REFERRALS_LOG.value}_real_1")])
         keyboard.append([InlineKeyboardButton("👑 لوحة تحكم المالك 👑", callback_data=Callback.ADMIN_PANEL.value)])
     return InlineKeyboardMarkup(keyboard)
 
 def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
+    # FIXED: The callback data now correctly forms "report_real_page_1"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 تقرير حقيقي", callback_data=f"{Callback.REPORT_PAGE.value}_real_page_1"), InlineKeyboardButton("⏳ تقرير وهمي", callback_data=f"{Callback.REPORT_PAGE.value}_fake_page_1")],
         [InlineKeyboardButton("👥 عدد المستخدمين", callback_data=Callback.ADMIN_USER_COUNT.value)],
@@ -457,13 +443,17 @@ async def ask_web_verification(message: Message, context: ContextTypes.DEFAULT_T
 
 # --- معالجات الرسائل والمدخلات (Input Handlers) ---
 async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles data sent from the web app using a device ID."""
+    """FIXED & REWRITTEN: Handles data sent from the web app, performing robust device ID verification."""
     if not update.effective_user or not update.message or not update.message.web_app_data:
         return
-        
+
     user_id = update.effective_user.id
-    data = json.loads(update.message.web_app_data.data)
-    device_id = data.get("device_id")
+    try:
+        data = json.loads(update.message.web_app_data.data)
+        device_id = data.get("device_id")
+    except (json.JSONDecodeError, AttributeError):
+        await update.message.reply_text(Messages.GENERIC_ERROR + " (بيانات تحقق تالفة)", reply_markup=ReplyKeyboardRemove())
+        return
 
     if not device_id:
         await update.message.reply_text(Messages.GENERIC_ERROR + " (لم يتم استلام بصمة الجهاز)", reply_markup=ReplyKeyboardRemove())
@@ -471,21 +461,44 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     logger.info(f"Received device_id {device_id} for user {user_id}. Verifying uniqueness...")
 
-    referrer_id = context.user_data.get('referrer_id')
-    
-    if await get_referrer(user_id):
-        logger.warning(f"User {user_id} has already been processed for a referral. Skipping...")
-    else:
-        is_allowed = await add_referral_mapping(user_id, referrer_id, device_id)
-        
-        if is_allowed:
-            if referrer_id:
-                await modify_referral_count(user_id=referrer_id, fake_delta=1)
-                logger.info(f"Referral mapping for {user_id} by {referrer_id} successful.")
-        else:
+    # 1. Check if the device has been used before by ANY user.
+    device_check_res = await run_sync_db(
+        lambda: supabase.table('referrals').select('referred_user_id').eq('device_id', device_id).execute()
+    )
+
+    is_device_already_used = device_check_res.count > 0
+
+    if is_device_already_used:
+        # Device is already in our database.
+        # Find out if the current user is the one who originally registered it.
+        first_user_data = device_check_res.data[0]
+        first_user_id = first_user_data.get('referred_user_id')
+
+        if user_id != first_user_id:
+            # A DIFFERENT user is trying to register with a known device. This is abuse.
+            logger.warning(f"Abuse detected: Device ID {device_id} (used by {first_user_id}) is now being used by {user_id}.")
             await update.message.reply_text(Messages.REFERRAL_ABUSE_DEVICE_USED, reply_markup=ReplyKeyboardRemove())
             return
+        else:
+            # The SAME user is coming back. This is fine, just a re-verification.
+            logger.info(f"User {user_id} is re-verifying with the same device ID {device_id}. Allowing to proceed.")
+    else:
+        # This is a new, unseen device. We can proceed with adding the referral mapping.
+        referrer_id = context.user_data.get('referrer_id')
+        
+        # Check if this user was already referred (e.g. clicked link, aborted, then clicked another)
+        if await get_referrer(user_id):
+            logger.warning(f"User {user_id} has already been processed for a referral. Skipping new referral mapping.")
+        else:
+            # User is new, device is new. Create the mapping.
+            await add_referral_mapping_in_db(user_id, referrer_id, device_id)
+            
+            # If there was a referrer, give them a pending (fake) point.
+            if referrer_id:
+                await modify_referral_count(user_id=referrer_id, fake_delta=1)
+                logger.info(f"New device {device_id} registered for user {user_id} by referrer {referrer_id}. Pending referral added.")
 
+    # If the user wasn't blocked for abuse, proceed to the next step.
     phone_button = [[KeyboardButton("اضغط هنا لمشاركة رقم هاتفك", request_contact=True)]]
     await update.message.reply_text(
         "تم التحقق من جهازك بنجاح! الآن، من فضلك شارك رقم هاتفك لإكمال العملية.",
@@ -627,9 +640,11 @@ async def handle_my_referrals_log(query: CallbackQuery, context: ContextTypes.DE
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
 async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # FIXED: Parsing logic is now correct because the callback data is fixed.
     try:
-        _, report_type, _, page_str = query.data.split('_')
-        page = int(page_str)
+        parts = query.data.split('_') # e.g., "report_real_page_1" -> ['report', 'real', 'page', '1']
+        report_type = parts[1]
+        page = int(parts[3])
     except (ValueError, IndexError) as e:
         logger.error(f"Error parsing report pagination callback: {query.data}, error: {e}")
         await query.answer("خطأ في البيانات.", show_alert=True)
@@ -858,12 +873,12 @@ async def handle_data_migration(query: CallbackQuery, context: ContextTypes.DEFA
 
 # --- معالج رسائل المالك (Admin Message Handler) ---
 async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # This handler is now only for admin state-based messages
     if not update.effective_user or update.effective_user.id not in Config.BOT_OWNER_IDS:
         return
 
     state = context.user_data.get('state')
-    if not state or not update.message or (not update.message.text and not update.message.photo): return
+    if not state or not update.message or not update.message.text:
+        return
     text = update.message.text
 
     if state == State.AWAITING_BROADCAST_MESSAGE:
@@ -957,23 +972,26 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
     
     if was_member and is_no_longer_member:
         logger.info(f"User {user.full_name} ({user.id}) left/was kicked from chat {result.chat.title}.")
-        await upsert_user_in_db({'user_id': user.id, 'is_verified': False})
-        
-        referrer_id = await get_referrer(user.id)
-        if referrer_id:
-            try:
-                updated_referrer = await modify_referral_count(user_id=referrer_id, real_delta=-1, fake_delta=1)
-                if updated_referrer:
-                    new_real_count = updated_referrer.get('total_real', 'N/A')
-                    mention = await get_user_mention(user.id, context)
-                    await context.bot.send_message(
-                        chat_id=referrer_id,
-                        text=f"⚠️ تنبيه! أحد المستخدمين الذين دعوتهم ({mention}) غادر.\n\n"
-                             f"تم تحديث رصيدك. رصيدك الحالي هو: *{new_real_count}* إحالة حقيقية.",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-            except TelegramError as e:
-                logger.warning(f"Could not send leave notification to referrer {referrer_id}: {e}")
+        db_user = await get_user_from_db(user.id)
+        # Only act if the user was previously verified
+        if db_user and db_user.get('is_verified'):
+            await upsert_user_in_db({'user_id': user.id, 'is_verified': False})
+            
+            referrer_id = await get_referrer(user.id)
+            if referrer_id:
+                try:
+                    updated_referrer = await modify_referral_count(user_id=referrer_id, real_delta=-1, fake_delta=1)
+                    if updated_referrer:
+                        new_real_count = updated_referrer.get('total_real', 'N/A')
+                        mention = await get_user_mention(user.id, context)
+                        await context.bot.send_message(
+                            chat_id=referrer_id,
+                            text=f"⚠️ تنبيه! أحد المستخدمين الذين دعوتهم ({mention}) غادر القناة.\n\n"
+                                 f"تم تحديث رصيدك. رصيدك الحالي هو: *{new_real_count}* إحالة حقيقية.",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                except TelegramError as e:
+                    logger.warning(f"Could not send leave notification to referrer {referrer_id}: {e}")
 
 # --- معالج الأزرار الرئيسي (Main Button Handler) ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1008,7 +1026,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif action == Callback.ADMIN_FORMAT_CONFIRM.value: await handle_admin_format_confirm(query)
     elif action == Callback.ADMIN_FORCE_REVERIFICATION.value: await handle_force_reverification(query)
     elif action in [c.value for c in [Callback.USER_ADD_REAL, Callback.USER_REMOVE_REAL, Callback.USER_ADD_FAKE, Callback.USER_REMOVE_FAKE]]: await handle_user_edit_action(query, context)
-    elif action.startswith(Callback.REPORT_PAGE.value): await handle_report_pagination(query, context)
+    elif action.startswith(f"{Callback.REPORT_PAGE.value}_"): await handle_report_pagination(query, context)
     elif action.startswith(Callback.MY_REFERRALS_LOG.value): await handle_my_referrals_log(query, context)
 
 # --- الدالة الرئيسية (Main Function) ---
@@ -1028,7 +1046,6 @@ def main() -> None:
     private_chat_filter = filters.ChatType.PRIVATE
     application.add_handler(MessageHandler(filters.CONTACT & private_chat_filter, handle_contact), group=2)
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler), group=2)
-    # This handler now only manages admin inputs, as the user verification flow no longer uses it.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_chat_filter, handle_admin_messages), group=2)
     
     logger.info("Bot is starting...")
