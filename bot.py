@@ -184,26 +184,35 @@ async def get_referrer(referred_id: int) -> Optional[int]:
         return None
 
 async def add_referral_mapping(referred_id: int, referrer_id: int, device_id: str) -> bool:
-    """Checks only for device ID abuse and adds the referral mapping."""
+    """Checks only for device ID abuse and adds the referral mapping. [ULTRA-ROBUST]"""
     try:
-        # Use count() for a more robust check of existing device IDs.
-        # استخدام count() للتحقق بشكل أكثر دقة من وجود بصمة الجهاز.
-        device_check_res = await run_sync_db(
-            lambda: supabase.table('referrals').select('device_id', count='exact').eq('device_id', device_id).execute()
+        # Step 1: Fetch ALL existing device IDs from the database.
+        # This is less efficient but removes any doubt about the query.
+        # الخطوة 1: جلب كل بصمات الأجهزة الموجودة. هذه الطريقة أبطأ لكنها تضمن عدم وجود أي خطأ في الاستعلام.
+        all_referrals_res = await run_sync_db(
+            lambda: supabase.table('referrals').select("device_id").execute()
         )
         
-        # If the count is 1 or more, the device is already registered.
-        # إذا كان العدد 1 أو أكثر، فهذا يعني أن الجهاز مسجل بالفعل.
-        if device_check_res.count > 0:
-            logger.warning(f"Abuse detected: Device ID {device_id} has already been used. Count: {device_check_res.count}. Blocking user {referred_id}.")
+        # Extract the device IDs into a Python set for fast lookup.
+        # استخراج البصمات ووضعها في مجموعة (set) للبحث السريع.
+        existing_device_ids = {ref['device_id'] for ref in all_referrals_res.data if ref.get('device_id')}
+        
+        # Step 2: Check if the new device_id is in the set.
+        # الخطوة 2: التحقق إذا كانت بصمة الجهاز الجديد موجودة في القائمة.
+        if device_id in existing_device_ids:
+            logger.warning(f"Abuse detected: Device ID {device_id} already exists. Blocking user {referred_id}.")
             return False
 
-        # If not found, add the new referral.
+        # Step 3: If the device ID is new, insert the record.
+        # الخطوة 3: إذا كانت البصمة جديدة، يتم تسجيل الإحالة.
         data = {'referred_user_id': referred_id, 'referrer_user_id': referrer_id, 'device_id': device_id}
         await run_sync_db(lambda: supabase.table('referrals').upsert(data, on_conflict='referred_user_id').execute())
+        
+        logger.info(f"Successfully mapped new device_id {device_id} to user {referred_id}.")
         return True
+
     except Exception as e:
-        logger.error(f"DB_ERROR: Adding referral map for {referred_id} with device ID {device_id}: {e}")
+        logger.error(f"DB_ERROR during robust add_referral_mapping for {referred_id}: {e}", exc_info=True)
         return False
 
 async def reset_all_referrals_in_db() -> None:
@@ -544,7 +553,7 @@ async def handle_admin_user_count(query: CallbackQuery) -> None:
     all_users = await get_all_users_from_db()
     total = len(all_users)
     verified = sum(1 for u in all_users if u.get('is_verified'))
-    text = f"📈 *إحصائيات مستخدمي البوت:*\n\n▫️ إجمالي المستخدمين: *{total}*\n✅ المستخدمون الموثقون: *{verified}*"
+    text = f"� *إحصائيات مستخدمي البوت:*\n\n▫️ إجمالي المستخدمين: *{total}*\n✅ المستخدمون الموثقون: *{verified}*"
     await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_panel_keyboard())
 
 async def handle_admin_broadcast(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -880,6 +889,7 @@ def main() -> None:
     private_chat_filter = filters.ChatType.PRIVATE
     application.add_handler(MessageHandler(filters.CONTACT & private_chat_filter, handle_contact), group=2)
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler), group=2)
+    # This handler now only manages admin inputs, as the user verification flow no longer uses it.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_chat_filter, handle_admin_messages), group=2)
     
     logger.info("Bot is starting...")
