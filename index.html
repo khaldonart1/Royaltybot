@@ -96,14 +96,20 @@
 
             // Use a free API to get the user's public IP address
             fetch('https://api.ipify.org?format=json')
-                .then(response => response.json())
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('فشل الاتصال بالشبكة');
+                    }
+                    return response.json();
+                })
                 .then(data => {
                     const ip = data.ip;
                     if (ip) {
                         statusElement.textContent = 'تم التحقق بنجاح!';
                         // Send the IP address back to the bot
                         tg.sendData(JSON.stringify({ ip: ip }));
-                        // The app will close automatically after sending data
+                        // *** THE FIX: Close the web app after sending data ***
+                        tg.close();
                     } else {
                         throw new Error('لم يتمكن من الحصول على عنوان IP.');
                     }
@@ -111,7 +117,10 @@
                 .catch(error => {
                     console.error('Error fetching IP:', error);
                     statusElement.textContent = 'حدث خطأ. يرجى المحاولة مرة أخرى.';
-                    tg.sendData(JSON.stringify({ error: 'Failed to get IP' }));
+                    // Send an error message back to the bot
+                    tg.sendData(JSON.stringify({ error: 'Failed to get IP', details: error.message }));
+                    // Close the app even if there is an error
+                    tg.close();
                 });
         });
     </script>
