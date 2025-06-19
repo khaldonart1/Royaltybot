@@ -38,7 +38,8 @@ from supabase import Client, create_client
 
 # --- Configuration ---
 class Config:
-    BOT_TOKEN = "7950170561:AAH5OtiK38BBhAnVofqxnLWRYbaZaIaKY4s"
+    # FIX: Updated BOT_TOKEN to match the one from the logs
+    BOT_TOKEN = "8094221199:AAElvV80WKnTlWvjS6M_7q_uvyR-lKa2H3Y"
     SUPABASE_URL = "https://jofxsqsgarvzolgphqjg.supabase.co"
     SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
     WEB_APP_URL = "https://heartfelt-biscuit-5489cd.netlify.app"
@@ -308,7 +309,6 @@ async def is_user_in_channel(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
     """Checks if a user is a member of the channel."""
     try:
         member = await context.bot.get_chat_member(chat_id=Config.CHANNEL_ID, user_id=user_id)
-        # FIX: Use ChatMember class constants, not instance attributes
         return member.status in {ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.CREATOR}
     except BadRequest as e:
         if "user not found" in str(e).lower():
@@ -369,28 +369,36 @@ def get_format_confirmation_keyboard() -> InlineKeyboardMarkup:
 
 # --- Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(f"Received /start command from user {update.effective_user.id}")
     if not update.message or not update.effective_user or update.effective_chat.type != Chat.PRIVATE: return
     user = update.effective_user
     db_user = await get_user_from_db(user.id)
     if db_user and db_user.get("is_verified"):
+        logger.info(f"User {user.id} is already verified. Sending main menu.")
         await update.message.reply_text(Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(user.id))
         return
     args = context.args
     if args:
         try:
             referrer_id = int(args[0])
-            if referrer_id != user.id: context.user_data['referrer_id'] = referrer_id
+            if referrer_id != user.id:
+                context.user_data['referrer_id'] = referrer_id
+                logger.info(f"User {user.id} was referred by {referrer_id}")
         except (ValueError, IndexError): pass
     await upsert_user_in_db({'user_id': user.id, 'full_name': user.full_name, 'username': user.username})
     try:
+        logger.info(f"Checking channel membership for user {user.id}")
         context.user_data['was_already_member'] = await is_user_in_channel(user.id, context)
-    except (TelegramError, BadRequest):
-        context.user_data['was_already_member'] = False # Assume not member if check fails
+        logger.info(f"User {user.id} was_already_member: {context.user_data['was_already_member']}")
+    except (TelegramError, BadRequest) as e:
+        logger.error(f"Could not check channel membership for {user.id} on start: {e}")
+        context.user_data['was_already_member'] = False
     await update.message.reply_text(Messages.START_WELCOME, reply_markup=ReplyKeyboardRemove())
     await ask_web_verification(update.message)
 
 async def my_referrals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message: return
+    logger.info(f"Received /invites command from user {update.effective_user.id}")
     msg = await update.message.reply_text(Messages.LOADING)
     user_info = await get_user_from_db(update.effective_user.id)
     text = get_referral_stats_text(user_info)
@@ -398,31 +406,37 @@ async def my_referrals_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message or not context.bot.username: return
+    logger.info(f"Received /link command from user {update.effective_user.id}")
     user_id = update.effective_user.id
     text = get_referral_link_text(user_id, context.bot.username)
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_main_menu_keyboard(user_id), disable_web_page_preview=True)
 
 async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message: return
+    logger.info(f"Received /top command from user {update.effective_user.id}")
     user_id = update.effective_user.id
     msg = await update.message.reply_text(Messages.LOADING)
     text = await get_top_5_text(user_id, context)
     await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_main_menu_keyboard(user_id), disable_web_page_preview=True)
 
 async def ask_web_verification(message: Message) -> None:
+    logger.info(f"Asking for web verification from user {message.from_user.id}")
     keyboard = ReplyKeyboardMarkup.from_button(KeyboardButton(text="🔒 اضغط هنا للتحقق من جهازك", web_app=WebAppInfo(url=Config.WEB_APP_URL)), resize_keyboard=True)
     await message.reply_text(Messages.WEB_VERIFY_PROMPT, reply_markup=keyboard)
 
 async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message or not update.message.web_app_data: return
     user_id = update.effective_user.id
+    logger.info(f"Received web_app_data from user {user_id}")
     try:
         data = json.loads(update.message.web_app_data.data)
         device_id = data.get("visitorId")
     except (json.JSONDecodeError, AttributeError):
+        logger.error(f"Failed to parse web_app_data from user {user_id}")
         await update.message.reply_text(Messages.GENERIC_ERROR + " (بيانات تحقق تالفة)", reply_markup=ReplyKeyboardRemove())
         return
     if not device_id:
+        logger.error(f"No visitorId in web_app_data from user {user_id}")
         await update.message.reply_text(Messages.GENERIC_ERROR + " (لم يتم استلام بصمة الجهاز)", reply_markup=ReplyKeyboardRemove())
         return
 
@@ -451,16 +465,21 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.contact or update.effective_chat.type != Chat.PRIVATE: return
+    user_id = update.effective_user.id
+    logger.info(f"Received contact from user {user_id}")
     contact = update.message.contact
-    if contact.user_id != update.effective_user.id:
+    if contact.user_id != user_id:
+        logger.warning(f"User {user_id} shared contact of another user ({contact.user_id})")
         await update.message.reply_text(Messages.PHONE_INVALID, reply_markup=ReplyKeyboardRemove())
         return
     phone_number = contact.phone_number.lstrip('+')
     if any(phone_number.startswith(code) for code in Config.ALLOWED_COUNTRY_CODES):
+        logger.info(f"User {user_id} has an allowed country code.")
         await update.message.reply_text(Messages.PHONE_SUCCESS, reply_markup=ReplyKeyboardRemove())
         keyboard = [[InlineKeyboardButton("1. الانضمام للقناة", url=Config.CHANNEL_URL)], [InlineKeyboardButton("✅ لقد انضممت، تحقق الآن", callback_data=Callback.CONFIRM_JOIN)]]
         await update.message.reply_text(Messages.JOIN_PROMPT, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
+        logger.warning(f"User {user_id} has a disallowed country code: {phone_number}")
         await update.message.reply_text(Messages.COUNTRY_NOT_ALLOWED, reply_markup=ReplyKeyboardRemove())
         await ask_web_verification(update.message)
 
@@ -471,7 +490,6 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
     user = result.new_chat_member.user
     chat_id = result.chat.id
 
-    # Check if the update is for the correct channel
     if chat_id != Config.CHANNEL_ID:
         return
 
@@ -482,10 +500,7 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
 
     if not was_member and is_member:
         logger.info(f"User {user.id} joined channel {chat_id}.")
-        # This part is now automatically handled by the join confirmation button,
-        # but we can add logic here if needed for users who join before pressing the button.
-        # For now, the user must still press the "Confirm Join" button to finalize verification.
-        pass # Let the CONFIRM_JOIN callback handle the final verification step.
+        pass
 
     elif was_member and not is_member:
         logger.info(f"User {user.id} left/was kicked from chat {chat_id}.")
@@ -509,8 +524,10 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
 
 async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or update.effective_user.id not in Config.BOT_OWNER_IDS or not update.message: return
+    user_id = update.effective_user.id
     state = context.user_data.get('state')
     text = update.message.text
+    logger.info(f"Admin {user_id} sent message in state {state}: {text}")
     if not state or not text: return
 
     if state == State.AWAITING_BROADCAST_MESSAGE: await handle_broadcast_message(update, context)
@@ -578,6 +595,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
 # --- Callback Helper Functions ---
 async def handle_button_press_my_referrals(query: CallbackQuery) -> None:
     if not query.from_user: return
+    logger.info(f"Handling '{query.data}' callback from user {query.from_user.id}")
     await query.edit_message_text(Messages.LOADING)
     user_info = await get_user_from_db(query.from_user.id)
     text = get_referral_stats_text(user_info)
@@ -585,6 +603,7 @@ async def handle_button_press_my_referrals(query: CallbackQuery) -> None:
 
 async def handle_button_press_top5(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not query.from_user: return
+    logger.info(f"Handling '{query.data}' callback from user {query.from_user.id}")
     try:
         await query.edit_message_text(Messages.LOADING)
         text = await get_top_5_text(query.from_user.id, context)
@@ -604,12 +623,14 @@ async def handle_button_press_top5(query: CallbackQuery, context: ContextTypes.D
 
 async def handle_button_press_link(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not query.from_user or not context.bot.username: return
+    logger.info(f"Handling '{query.data}' callback from user {query.from_user.id}")
     user_id = query.from_user.id
     text = get_referral_link_text(user_id, context.bot.username)
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_main_menu_keyboard(user_id), disable_web_page_preview=True)
 
 async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = query.from_user
+    logger.info(f"Handling '{query.data}' callback from user {user.id}")
     await query.edit_message_text(Messages.LOADING)
     try:
         if await is_user_in_channel(user.id, context):
@@ -642,9 +663,11 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
 
 # --- Admin Panel Callback Functions ---
 async def handle_admin_panel(query: CallbackQuery) -> None:
+    logger.info(f"Admin {query.from_user.id} accessed admin panel.")
     await query.edit_message_text(text=Messages.ADMIN_WELCOME, reply_markup=get_admin_panel_keyboard())
 
 async def handle_admin_user_count(query: CallbackQuery) -> None:
+    logger.info(f"Admin {query.from_user.id} requested user count.")
     all_users = await get_all_users_from_db()
     total = len(all_users)
     verified = sum(1 for u in all_users if u.get('is_verified'))
@@ -652,6 +675,7 @@ async def handle_admin_user_count(query: CallbackQuery) -> None:
     await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_admin_panel_keyboard())
 
 async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(f"Admin {query.from_user.id} requested report: {query.data}")
     try:
         parts = query.data.split('_'); report_type, page = parts[1], int(parts[3])
         await query.edit_message_text(Messages.LOADING)
@@ -689,11 +713,13 @@ async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.D
 
 
 async def handle_admin_broadcast(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(f"Admin {query.from_user.id} initiated broadcast.")
     context.user_data['state'] = State.AWAITING_BROADCAST_MESSAGE
     await query.edit_message_text(text="أرسل الآن الرسالة التي تريد إذاعتها لجميع المستخدمين الموثقين.")
 
 async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message: return
+    logger.info(f"Admin {update.effective_user.id} is sending a broadcast.")
     context.user_data['state'] = None
     await update.message.reply_text("⏳ جاري إرسال الإذاعة...")
     verified_users = [u for u in await get_all_users_from_db() if u.get('is_verified')]
@@ -708,11 +734,13 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
     await update.message.reply_text(f"✅ اكتملت الإذاعة!\n\nتم الإرسال إلى: {sent}\nفشل الإرسال: {failed}")
 
 async def handle_admin_universal_broadcast(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(f"Admin {query.from_user.id} initiated universal broadcast.")
     context.user_data['state'] = State.AWAITING_UNIVERSAL_BROADCAST_MESSAGE
     await query.edit_message_text(text="أرسل الآن الرسالة التي تريد إذاعتها لجميع المستخدمين المسجلين.")
 
 async def handle_universal_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message: return
+    logger.info(f"Admin {update.effective_user.id} is sending a universal broadcast.")
     context.user_data['state'] = None
     await update.message.reply_text("⏳ جاري إرسال الإذاعة الشاملة...")
     all_users = await get_all_users_from_db()
@@ -727,23 +755,28 @@ async def handle_universal_broadcast_message(update: Update, context: ContextTyp
     await update.message.reply_text(f"✅ اكتملت الإذاعة الشاملة!\n\nتم الإرسال إلى: {sent}\nفشل الإرسال: {failed}")
 
 async def handle_booo_menu(query: CallbackQuery) -> None:
+    logger.info(f"Admin {query.from_user.id} accessed booo menu.")
     await query.edit_message_text("👾 *Booo*\n\nاختر الأداة:", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_booo_menu_keyboard())
 
 async def handle_user_edit_menu(query: CallbackQuery) -> None:
+    logger.info(f"Admin {query.from_user.id} accessed user edit menu.")
     await query.edit_message_text("👤 *تعديل إحصائيات المستخدم*", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_user_edit_keyboard())
 
 async def handle_user_edit_action(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(f"Admin {query.from_user.id} initiated user edit action: {query.data}")
     context.user_data['state'] = State.AWAITING_EDIT_USER_ID
     context.user_data['action_type'] = query.data
     await query.edit_message_text(text="الرجاء إرسال الـ ID الرقمي للمستخدم.")
 
 async def handle_admin_inspect_request(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(f"Admin {query.from_user.id} initiated inspect referrals.")
     context.user_data['state'] = State.AWAITING_INSPECT_USER_ID
     await query.edit_message_text(text="🔍 الرجاء إرسال الـ ID الرقمي للمستخدم الذي تريد فحص إحالاته.")
 
 async def display_target_referrals_log(message: Optional[Message], query: Optional[CallbackQuery], context: ContextTypes.DEFAULT_TYPE, target_user_id: int, log_type: str, page: int) -> None:
     target = query.message if query else message
     if not target: return
+    logger.info(f"Displaying referral log for {target_user_id}, type {log_type}, page {page}")
     await target.edit_text(Messages.LOADING)
 
     real_ids, fake_ids = await get_my_referrals_details(target_user_id)
@@ -780,10 +813,12 @@ async def handle_inspect_log_pagination(query: CallbackQuery, context: ContextTy
     try:
         _, target_id_str, log_type, page_str = query.data.split('_')
         target_user_id, page = int(target_id_str), int(page_str)
+        logger.info(f"Paginating inspect log for {target_user_id} to page {page}")
     except (ValueError, IndexError): return
     await display_target_referrals_log(None, query, context, target_user_id, log_type, page)
 
 async def handle_data_migration(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(f"Admin {query.from_user.id} initiated data migration.")
     await query.edit_message_text("⏳ **بدء عملية إعادة حساب وترحيل البيانات...**", parse_mode=ParseMode.MARKDOWN_V2)
     try:
         all_users = await get_all_users_from_db()
@@ -805,9 +840,11 @@ async def handle_data_migration(query: CallbackQuery, context: ContextTypes.DEFA
         await query.edit_message_text(f"❌ فشلت العملية.\n`{e}`", reply_markup=get_admin_panel_keyboard())
 
 async def handle_admin_reset_all(query: CallbackQuery) -> None:
+    logger.info(f"Admin {query.from_user.id} initiated reset all.")
     await query.edit_message_text("⚠️ *تأكيد* ⚠️\nهل أنت متأكد أنك تريد تصفير *جميع* الإحالات؟", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_reset_confirmation_keyboard())
 
 async def handle_admin_reset_confirm(query: CallbackQuery) -> None:
+    logger.warning(f"Admin {query.from_user.id} confirmed reset all.")
     try:
         await query.edit_message_text(text="⏳ جاري تصفير جميع الإحالات...")
         await reset_all_referrals_in_db()
@@ -817,9 +854,11 @@ async def handle_admin_reset_confirm(query: CallbackQuery) -> None:
         await query.edit_message_text(f"❌ فشل تصفير الإحالات.\n`{e}`", reply_markup=get_admin_panel_keyboard())
 
 async def handle_admin_format_bot(query: CallbackQuery) -> None:
+    logger.critical(f"Admin {query.from_user.id} initiated FORMAT BOT.")
     await query.edit_message_text("⚠️⚠️⚠️ *تحذير خطير جداً* ⚠️⚠️⚠️\n\nأنت على وشك حذف **جميع بيانات البوت بشكل نهائي**.\nهذا الإجراء لا يمكن التراجع عنه.", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_format_confirmation_keyboard())
 
 async def handle_admin_format_confirm(query: CallbackQuery) -> None:
+    logger.critical(f"Admin {query.from_user.id} CONFIRMED FORMAT BOT.")
     try:
         await query.edit_message_text(text="⏳ جاري تنفيذ الفورمات...")
         await format_bot_in_db()
@@ -830,6 +869,7 @@ async def handle_admin_format_confirm(query: CallbackQuery) -> None:
 
 
 async def handle_force_reverification(query: CallbackQuery) -> None:
+    logger.info(f"Admin {query.from_user.id} initiated force reverification.")
     await query.edit_message_text(text="⏳ جاري إلغاء تحقق جميع المستخدمين...")
     await unverify_all_users_in_db()
     await query.edit_message_text("✅ تم إلغاء تحقق جميع المستخدمين.", reply_markup=get_admin_panel_keyboard())
@@ -838,6 +878,7 @@ async def handle_force_reverification(query: CallbackQuery) -> None:
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query or not query.data or not query.from_user: return
+    logger.info(f"Button press from user {query.from_user.id}: {query.data}")
     try:
         await query.answer()
     except BadRequest as e:
@@ -884,26 +925,40 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.error(f"Failed to send generic error message: {inner_e}")
 
 
+# --- Health Check ---
+async def post_init(application: Application) -> None:
+    """Send a message to the owner to confirm the bot has started."""
+    logger.info("Running post_init health check.")
+    for owner_id in Config.BOT_OWNER_IDS:
+        try:
+            await application.bot.send_message(
+                chat_id=owner_id,
+                text=f"✅ RoyaltyBot has started successfully at {time.ctime()}"
+            )
+            logger.info(f"Sent startup notification to owner {owner_id}")
+        except Exception as e:
+            logger.error(f"Could not send startup message to owner {owner_id}: {e}")
+
+
 # --- Main Function ---
 def main() -> None:
     """Starts the bot."""
-    application = Application.builder().token(Config.BOT_TOKEN).build()
-    
-    # Register handlers with distinct groups to manage execution order
+    application = Application.builder().token(Config.BOT_TOKEN).post_init(post_init).build()
+
     application.add_handler(ChatMemberHandler(handle_chat_member_updates, ChatMemberHandler.CHAT_MEMBER), group=0)
-    
+
     application.add_handler(CommandHandler("start", start_command), group=1)
     application.add_handler(CommandHandler("invites", my_referrals_command), group=1)
     application.add_handler(CommandHandler("link", link_command), group=1)
     application.add_handler(CommandHandler("top", top_command), group=1)
-    
+
     application.add_handler(CallbackQueryHandler(button_handler), group=1)
-    
+
     private_filter = filters.ChatType.PRIVATE
     application.add_handler(MessageHandler(filters.CONTACT & private_filter, handle_contact), group=2)
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler), group=2)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_filter, handle_admin_messages), group=2)
-    
+
     logger.info("Bot is starting...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
