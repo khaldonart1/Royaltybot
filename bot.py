@@ -305,10 +305,13 @@ async def is_user_in_channel(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
     try:
         member = await context.bot.get_chat_member(chat_id=Config.CHANNEL_ID, user_id=user_id)
         return member.status in {User.MEMBER, User.ADMINISTRATOR, User.CREATOR}
-    except TelegramError as e:
+    except BadRequest as e:
         if "user not found" in str(e).lower():
-            return False # User is definitely not in the channel
-        logger.warning(f"Error checking membership for {user_id}: {e}")
+            return False 
+        else:
+             logger.error(f"Telegram BadRequest checking membership for {user_id}: {e}. The bot might lack admin rights in the channel.")
+    except TelegramError as e:
+        logger.warning(f"TelegramError checking membership for {user_id}: {e}")
     except Exception as e:
         logger.error(f"Unexpected error checking membership for {user_id}: {e}")
     return False
@@ -778,37 +781,47 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         await query.answer()
     except BadRequest as e:
-        if "Query is too old" not in str(e).lower(): raise e
-        else: return
+        if "Query is too old" not in str(e).lower():
+            logger.warning(f"Could not answer old callback query {query.id}: {e}")
+        else: 
+            logger.error(f"BadRequest on callback query {query.id}: {e}")
+        return
     
     action = query.data
     user_id = query.from_user.id
     
-    # User Menu
-    if action == Callback.MAIN_MENU: await query.edit_message_text(text=Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(user_id))
-    elif action == Callback.MY_REFERRALS: await handle_button_press_my_referrals(query)
-    elif action == Callback.MY_LINK: await handle_button_press_link(query, context)
-    elif action == Callback.TOP_5: await handle_button_press_top5(query, context)
-    elif action == Callback.CONFIRM_JOIN: await handle_confirm_join(query, context)
-    
-    # Admin Panel Routing
-    elif user_id in Config.BOT_OWNER_IDS:
-        if action == Callback.ADMIN_PANEL: await handle_admin_panel(query)
-        elif action == Callback.ADMIN_USER_COUNT: await handle_admin_user_count(query)
-        elif action.startswith(f"{Callback.REPORT_PAGE}_"): await handle_report_pagination(query, context)
-        elif action == Callback.ADMIN_INSPECT_REFERRALS: await handle_admin_inspect_request(query, context)
-        elif action.startswith(f"{Callback.INSPECT_LOG}_"): await handle_inspect_log_pagination(query, context)
-        elif action == Callback.ADMIN_BOOO_MENU: await handle_booo_menu(query)
-        elif action == Callback.ADMIN_USER_EDIT_MENU: await handle_user_edit_menu(query)
-        elif action in [Callback.USER_ADD_REAL, Callback.USER_REMOVE_REAL, Callback.USER_ADD_FAKE, Callback.USER_REMOVE_FAKE]: await handle_user_edit_action(query, context)
-        elif action == Callback.ADMIN_BROADCAST: await handle_admin_broadcast(query, context)
-        elif action == Callback.ADMIN_UNIVERSAL_BROADCAST: await handle_admin_universal_broadcast(query, context)
-        elif action == Callback.ADMIN_FORCE_REVERIFICATION: await handle_force_reverification(query)
-        elif action == Callback.ADMIN_RESET_ALL: await handle_admin_reset_all(query)
-        elif action == Callback.ADMIN_RESET_CONFIRM: await handle_admin_reset_confirm(query)
-        elif action == Callback.DATA_MIGRATION: await handle_data_migration(query, context)
-        elif action == Callback.ADMIN_FORMAT_BOT: await handle_admin_format_bot(query)
-        elif action == Callback.ADMIN_FORMAT_CONFIRM: await handle_admin_format_confirm(query)
+    try:
+        # User Menu
+        if action == Callback.MAIN_MENU: await query.edit_message_text(text=Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(user_id))
+        elif action == Callback.MY_REFERRALS: await handle_button_press_my_referrals(query)
+        elif action == Callback.MY_LINK: await handle_button_press_link(query, context)
+        elif action == Callback.TOP_5: await handle_button_press_top5(query, context)
+        elif action == Callback.CONFIRM_JOIN: await handle_confirm_join(query, context)
+        
+        # Admin Panel Routing
+        elif user_id in Config.BOT_OWNER_IDS:
+            if action == Callback.ADMIN_PANEL: await handle_admin_panel(query)
+            elif action == Callback.ADMIN_USER_COUNT: await handle_admin_user_count(query)
+            elif action.startswith(f"{Callback.REPORT_PAGE}_"): await handle_report_pagination(query, context)
+            elif action == Callback.ADMIN_INSPECT_REFERRALS: await handle_admin_inspect_request(query, context)
+            elif action.startswith(f"{Callback.INSPECT_LOG}_"): await handle_inspect_log_pagination(query, context)
+            elif action == Callback.ADMIN_BOOO_MENU: await handle_booo_menu(query)
+            elif action == Callback.ADMIN_USER_EDIT_MENU: await handle_user_edit_menu(query)
+            elif action in [Callback.USER_ADD_REAL, Callback.USER_REMOVE_REAL, Callback.USER_ADD_FAKE, Callback.USER_REMOVE_FAKE]: await handle_user_edit_action(query, context)
+            elif action == Callback.ADMIN_BROADCAST: await handle_admin_broadcast(query, context)
+            elif action == Callback.ADMIN_UNIVERSAL_BROADCAST: await handle_admin_universal_broadcast(query, context)
+            elif action == Callback.ADMIN_FORCE_REVERIFICATION: await handle_force_reverification(query)
+            elif action == Callback.ADMIN_RESET_ALL: await handle_admin_reset_all(query)
+            elif action == Callback.ADMIN_RESET_CONFIRM: await handle_admin_reset_confirm(query)
+            elif action == Callback.DATA_MIGRATION: await handle_data_migration(query, context)
+            elif action == Callback.ADMIN_FORMAT_BOT: await handle_admin_format_bot(query)
+            elif action == Callback.ADMIN_FORMAT_CONFIRM: await handle_admin_format_confirm(query)
+    except Exception as e:
+        logger.error(f"An error occurred in button_handler for action {action} by user {user_id}: {e}", exc_info=True)
+        try:
+            await query.message.reply_text(Messages.GENERIC_ERROR)
+        except:
+            pass
 
 # --- Main Function ---
 def main() -> None:
