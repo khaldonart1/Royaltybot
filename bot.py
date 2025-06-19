@@ -39,7 +39,7 @@ from supabase import Client, create_client
 # --- Configuration ---
 class Config:
     # FIX: Updated BOT_TOKEN to match the one from the logs
-    BOT_TOKEN = "8094221199:AAElvV80WKnTlWvjS6M_7q_uvyR-lKa2H3Y"
+    BOT_TOKEN = "7950170561:AAH5OtiK38BBhAnVofqxnLWRYbaZaIaKY4s"
     SUPABASE_URL = "https://jofxsqsgarvzolgphqjg.supabase.co"
     SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
     WEB_APP_URL = "https://heartfelt-biscuit-5489cd.netlify.app"
