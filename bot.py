@@ -87,10 +87,10 @@ class Callback(str, Enum):
     ADMIN_INSPECT_REFERRALS = "admin_inspect_referrals"
     INSPECT_LOG = "inspect_log"
 
-# --- Bot Messages ---
+# --- Bot Messages (User-facing text in Arabic) ---
 class Messages:
     VERIFIED_WELCOME = "أهلاً بك مجدداً! ✅\n\nاستخدم الأزرار أو الأوامر للتفاعل مع البوت."
-    START_WELCOME = "أهلاً بك في البوت! �\n\nللبدء، نحتاج للتحقق من جهازك. الرجاء الضغط على الزر أدناه."
+    START_WELCOME = "أهلاً بك في البوت! 👋\n\nللبدء، نحتاج للتحقق من جهازك. الرجاء الضغط على الزر أدناه."
     WEB_VERIFY_PROMPT = "للتحقق من أنك لا تستخدم نفس الجهاز عدة مرات، الرجاء الضغط على الزر أدناه."
     PHONE_PROMPT = "تم التحقق من جهازك بنجاح! الآن، من فضلك شارك رقم هاتفك لإكمال العملية."
     PHONE_SUCCESS = "تم استلام الرقم بنجاح."
@@ -128,11 +128,13 @@ except Exception as e:
 
 # --- Helper Functions ---
 def clean_name_for_markdown(name: str) -> str:
+    """Escapes characters for MarkdownV2 parsing."""
     if not name: return ""
     escape_chars = r"([_*\[\]()~`>#\+\-=|{}\.!\\])"
     return re.sub(escape_chars, r"\\\1", name)
 
 async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Gets a Markdown-safe user mention, using a cache to reduce API calls."""
     cache = context.bot_data.setdefault('mention_cache', {})
     current_time = time.time()
     if user_id in cache and (current_time - cache[user_id].get('timestamp', 0) < Config.MENTION_CACHE_TTL_SECONDS):
@@ -143,7 +145,7 @@ async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
         mention = f"[{full_name}](tg://user?id={user_id})"
     except (TelegramError, BadRequest):
         db_user_info = await get_user_from_db(user_id)
-        full_name = "مستخدم غير معروف"
+        full_name = "Unknown User"
         if db_user_info:
             full_name = clean_name_for_markdown(db_user_info.get("full_name", f"User {user_id}"))
         mention = f"[{full_name}](tg://user?id={user_id})"
@@ -152,9 +154,11 @@ async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # --- Database Functions ---
 async def run_sync_db(func: Callable[[], Any]) -> Any:
+    """Runs a synchronous database function in a separate thread."""
     return await asyncio.to_thread(func)
 
 async def get_user_from_db(user_id: int) -> Optional[Dict[str, Any]]:
+    """Fetches a single user's data from the database."""
     try:
         res = await run_sync_db(lambda: supabase.table('users').select("*").eq('user_id', user_id).single().execute())
         return res.data
@@ -162,12 +166,14 @@ async def get_user_from_db(user_id: int) -> Optional[Dict[str, Any]]:
         return None
 
 async def upsert_user_in_db(user_data: Dict[str, Any]) -> None:
+    """Inserts or updates a user's data in the database."""
     try:
         await run_sync_db(lambda: supabase.table('users').upsert(user_data).execute())
     except Exception as e:
         logger.error(f"DB_ERROR: Upserting user {user_data.get('user_id')}: {e}")
 
 async def get_all_users_from_db() -> List[Dict[str, Any]]:
+    """Fetches all users from the database."""
     try:
         res = await run_sync_db(lambda: supabase.table('users').select("*").execute())
         return res.data or []
@@ -176,6 +182,7 @@ async def get_all_users_from_db() -> List[Dict[str, Any]]:
         return []
 
 async def get_referrer(referred_id: int) -> Optional[int]:
+    """Finds the referrer for a given referred user."""
     try:
         res = await run_sync_db(lambda: supabase.table('referrals').select('referrer_user_id').eq('referred_user_id', referred_id).execute())
         return res.data[0].get('referrer_user_id') if res.data else None
@@ -183,6 +190,7 @@ async def get_referrer(referred_id: int) -> Optional[int]:
         return None
 
 async def add_referral_mapping_in_db(referred_id: int, referrer_id: Optional[int], device_id: str) -> None:
+    """Adds a referral relationship and device ID to the database."""
     try:
         data = {'referred_user_id': referred_id, 'referrer_user_id': referrer_id, 'device_id': device_id}
         await run_sync_db(lambda: supabase.table('referrals').upsert(data, on_conflict='referred_user_id').execute())
@@ -190,6 +198,7 @@ async def add_referral_mapping_in_db(referred_id: int, referrer_id: Optional[int
         logger.error(f"DB_ERROR: Adding referral map for {referred_id}: {e}")
 
 async def get_my_referrals_details(user_id: int) -> Tuple[List[int], List[int]]:
+    """Gets lists of real and fake referral IDs for a user."""
     try:
         all_refs_res = await run_sync_db(lambda: supabase.table('referrals').select('referred_user_id').eq('referrer_user_id', user_id).execute())
         if not all_refs_res.data: return [], []
@@ -204,6 +213,7 @@ async def get_my_referrals_details(user_id: int) -> Tuple[List[int], List[int]]:
         return [], []
 
 async def reset_all_referrals_in_db() -> None:
+    """Resets all referral stats for all users to zero."""
     try:
         await run_sync_db(lambda: supabase.table('referrals').delete().gt('referred_user_id', 0).execute())
         await run_sync_db(lambda: supabase.table('users').update({"total_real": 0, "total_fake": 0}).gt('user_id', 0).execute())
@@ -212,6 +222,7 @@ async def reset_all_referrals_in_db() -> None:
         logger.error(f"DB_ERROR: Resetting all referrals: {e}")
 
 async def format_bot_in_db() -> None:
+    """Deletes all user and referral data from the database."""
     try:
         await run_sync_db(lambda: supabase.table('referrals').delete().gt('referred_user_id', 0).execute())
         await run_sync_db(lambda: supabase.table('users').delete().gt('user_id', 0).execute())
@@ -220,6 +231,7 @@ async def format_bot_in_db() -> None:
         logger.error(f"DB_ERROR: Formatting bot: {e}")
 
 async def unverify_all_users_in_db() -> None:
+    """Sets the is_verified flag to False for all users."""
     try:
         await run_sync_db(lambda: supabase.table('users').update({"is_verified": False}).gt('user_id', 0).execute())
         logger.info("All users have been un-verified.")
@@ -228,7 +240,7 @@ async def unverify_all_users_in_db() -> None:
 
 # --- Display Functions ---
 def get_referral_stats_text(user_info: Optional[Dict[str, Any]]) -> str:
-    if not user_info: return "لا توجد لديك بيانات بعد."
+    if not user_info: return Messages.NO_REFERRALS_YET
     total_real = int(user_info.get("total_real", 0) or 0)
     total_fake = int(user_info.get("total_fake", 0) or 0)
     return f"📊 *إحصائيات إحالاتك:*\n\n✅ الإحالات الحقيقية: `{total_real}`\n⏳ الإحالات الوهمية: `{total_fake}`"
@@ -294,6 +306,8 @@ async def is_user_in_channel(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
         member = await context.bot.get_chat_member(chat_id=Config.CHANNEL_ID, user_id=user_id)
         return member.status in {User.MEMBER, User.ADMINISTRATOR, User.CREATOR}
     except TelegramError as e:
+        if "user not found" in str(e).lower():
+            return False # User is definitely not in the channel
         logger.warning(f"Error checking membership for {user_id}: {e}")
     except Exception as e:
         logger.error(f"Unexpected error checking membership for {user_id}: {e}")
