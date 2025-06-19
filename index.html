@@ -1,149 +1,136 @@
 <!DOCTYPE html>
-<html lang="ar">
+<html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>التحقق من الجهاز</title>
-    <!-- Telegram Web App script -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
-
+        :root {
+            --bg-color: #f0f2f5;
+            --text-color: #1c1e21;
+            --container-bg: #ffffff;
+            --button-bg: #00a651;
+            --button-text: #ffffff;
+        }
         body {
             font-family: 'Cairo', sans-serif;
-            background-color: var(--tg-theme-bg-color, #f4f4f4);
-            color: var(--tg-theme-text-color, #222222);
-            text-align: center;
-            padding: 20px;
-            margin: 0;
+            background-color: var(--tg-theme-bg-color, var(--bg-color));
+            color: var(--tg-theme-text-color, var(--text-color));
             display: flex;
-            flex-direction: column;
             justify-content: center;
             align-items: center;
             height: 100vh;
+            margin: 0;
+            padding: 15px;
             box-sizing: border-box;
         }
-
         .container {
-            background-color: var(--tg-theme-secondary-bg-color, #ffffff);
-            padding: 30px;
+            background-color: var(--tg-theme-secondary-bg-color, var(--container-bg));
+            padding: 25px;
             border-radius: 12px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            text-align: center;
             max-width: 400px;
-            width: 90%;
+            width: 100%;
         }
-        
-        /* --- تنسيق الشعار --- */
         .logo {
-            max-width: 120px; /* تم تعديل الحجم لسرعة التحميل */
+            max-width: 100px;
             height: auto;
-            margin-bottom: 20px;
+            margin-bottom: 15px;
             border-radius: 50%;
         }
-
         h1 {
-            color: var(--tg-theme-text-color, #111111);
-            font-size: 24px;
-            margin-bottom: 15px;
+            font-size: 22px;
+            margin-bottom: 10px;
         }
-
         p {
-            font-size: 16px;
-            margin-bottom: 25px;
-            line-height: 1.5;
+            font-size: 15px;
+            margin-bottom: 20px;
+            line-height: 1.6;
         }
-
         button {
             font-family: 'Cairo', sans-serif;
-            background-color: var(--tg-theme-button-color, #00a651);
-            color: var(--tg-theme-button-text-color, #ffffff);
+            background-color: var(--tg-theme-button-color, var(--button-bg));
+            color: var(--tg-theme-button-text-color, var(--button-text));
             border: none;
-            padding: 15px 30px;
-            font-size: 18px;
+            padding: 14px 28px;
+            font-size: 17px;
             font-weight: 700;
             border-radius: 8px;
             cursor: pointer;
-            transition: background-color 0.3s, transform 0.2s;
             width: 100%;
+            transition: opacity 0.2s;
         }
-
         button:disabled {
             background-color: #cccccc;
             cursor: not-allowed;
         }
-        
         #status {
-            margin-top: 20px;
+            margin-top: 15px;
             font-weight: bold;
+            font-size: 14px;
         }
     </style>
 </head>
 <body>
-
     <div class="container">
-        
-        <img src="https://i.postimg.cc/0yBfcwhw/Business.png" alt="شعار" class="logo" loading="lazy" decoding="async">
-
+        <img src="https://i.postimg.cc/0yBfcwhw/Business.png" alt="شعار" class="logo">
         <h1>التحقق من الجهاز</h1>
-        <p>لمنع إساءة استخدام نظام الدعوات، نحتاج للتأكد من جهازك. يرجى الضغط على الزر أدناه للمتابعة.</p>
+        <p>اضغط على الزر أدناه لإكمال عملية التحقق ومنع إساءة استخدام النظام.</p>
         <button id="verifyButton">اضغط هنا للتحقق</button>
         <p id="status"></p>
     </div>
-
     <script>
         const tg = window.Telegram.WebApp;
         const verifyButton = document.getElementById('verifyButton');
         const statusElement = document.getElementById('status');
         
-        // --- دالة إنشاء بصمة الجهاز الخفيفة ---
-        async function getDeviceId() {
-            // 1. جمع البيانات الأساسية من المتصفح
-            const components = {
-                userAgent: navigator.userAgent,
-                language: navigator.language,
-                screenResolution: `${screen.width}x${screen.height}`,
-                timezone: new Date().getTimezoneOffset(),
-                cpuCores: navigator.hardwareConcurrency || 'unknown',
-            };
-
-            // 2. تحويل البيانات إلى نص واحد
-            const dataString = JSON.stringify(components);
-
-            // 3. تشفير النص باستخدام واجهة التشفير المدمجة في المتصفح (سريعة وآمنة)
-            const encoder = new TextEncoder();
-            const data = encoder.encode(dataString);
-            const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-
-            // 4. تحويل الشيفرة إلى نص يمكن قراءته
-            const hashArray = Array.from(new Uint8Array(hashBuffer));
-            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-            
-            return hashHex;
+        function getSimpleDeviceId() {
+            // A simple but effective combination of browser properties.
+            const props = [
+                navigator.userAgent,
+                navigator.language,
+                screen.width,
+                screen.height,
+                new Date().getTimezoneOffset()
+            ];
+            // Simple hash function to create a consistent ID.
+            let hash = 0;
+            const combinedString = props.join('||');
+            for (let i = 0; i < combinedString.length; i++) {
+                const char = combinedString.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash |= 0; // Convert to 32bit integer
+            }
+            return 'id-' + Math.abs(hash).toString(16);
         }
 
         tg.ready();
         tg.expand();
         
         verifyButton.addEventListener('click', () => {
-            statusElement.textContent = 'جاري التحقق...';
-            verifyButton.disabled = true;
+            try {
+                statusElement.textContent = 'جاري التحقق...';
+                verifyButton.disabled = true;
 
-            getDeviceId()
-                .then(deviceId => {
+                const deviceId = getSimpleDeviceId();
+
+                if (deviceId) {
                     statusElement.textContent = 'تم التحقق بنجاح!';
-                    // إرسال البصمة إلى البوت
                     tg.sendData(JSON.stringify({ device_id: deviceId }));
-                    // إغلاق النافذة بعد فترة قصيرة
-                    setTimeout(() => tg.close(), 1000);
-                })
-                .catch(error => {
-                    console.error('Device ID Generation Error:', error);
-                    statusElement.textContent = 'فشل التحقق. يرجى المحاولة مرة أخرى.';
-                    verifyButton.disabled = false;
-                    tg.showAlert('حدث خطأ غير متوقع. يرجى إغلاق النافذة والمحاولة مرة أخرى.');
-                });
+                    setTimeout(() => tg.close(), 500);
+                } else {
+                    throw new Error("Failed to generate device ID.");
+                }
+            } catch (error) {
+                console.error('Verification Error:', error);
+                statusElement.textContent = 'فشل التحقق. يرجى المحاولة مرة أخرى.';
+                verifyButton.disabled = false;
+                tg.showAlert('حدث خطأ. يرجى إغلاق النافذة والمحاولة مرة أخرى.');
+            }
         });
     </script>
-
 </body>
 </html>

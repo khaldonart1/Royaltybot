@@ -50,7 +50,8 @@ class Config:
     BOT_TOKEN = "7950170561:AAH5OtiK38BBhAnVofqxnLWRYbaZaIaKY4s"
     SUPABASE_URL = "https://jofxsqsgarvzolgphqjg.supabase.co"
     SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
-    WEB_APP_URL = "https://khaldonart.pythonanywhere.com"
+    # --- تم تحديث الرابط ---
+    WEB_APP_URL = "https://polite-hummingbird-574fda.netlify.app"
     CHANNEL_ID = -1002686156311
     CHANNEL_URL = "https://t.me/Ry_Hub"
     BOT_OWNER_IDS = {596472053, 7164133014, 1971453570}
@@ -68,7 +69,7 @@ class State(Enum):
     AWAITING_EDIT_AMOUNT = auto()
     AWAITING_BROADCAST_MESSAGE = auto()
     AWAITING_UNIVERSAL_BROADCAST_MESSAGE = auto()
-    AWAITING_INSPECT_USER_ID = auto() # NEW: State for admin inspecting referrals
+    AWAITING_INSPECT_USER_ID = auto()
 
 # --- تعريفات أزرار الكيبورد (Callback) ---
 class Callback(Enum):
@@ -94,8 +95,8 @@ class Callback(Enum):
     ADMIN_FORMAT_CONFIRM = "admin_format_confirm"
     ADMIN_FORCE_REVERIFICATION = "admin_force_reverification"
     ADMIN_UNIVERSAL_BROADCAST = "admin_universal_broadcast"
-    ADMIN_INSPECT_REFERRALS = "admin_inspect_referrals" # NEW: For admin tool
-    INSPECT_LOG = "inspect_log" # NEW: For admin tool pagination
+    ADMIN_INSPECT_REFERRALS = "admin_inspect_referrals"
+    INSPECT_LOG = "inspect_log"
 
 # --- رسائل البوت (Messages) ---
 class Messages:
@@ -457,7 +458,6 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     logger.info(f"Received device_id {device_id} for user {user_id}. Verifying uniqueness...")
 
     try:
-        # Check if the device_id has already been registered by any user.
         device_usage_res = await run_sync_db(
             lambda: supabase.table('referrals').select('referred_user_id').eq('device_id', device_id).limit(1).single().execute()
         )
@@ -470,14 +470,12 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
             logger.info(f"User {user_id} is re-submitting with their own known device_id. Allowing.")
         else:
-            # New device. Map it to the user.
             referrer_id = context.user_data.get('referrer_id')
             await add_referral_mapping_in_db(user_id, referrer_id, device_id)
             if referrer_id:
                 await modify_referral_count(user_id=referrer_id, fake_delta=1)
                 logger.info(f"New device {device_id} mapped to user {user_id} under referrer {referrer_id}.")
 
-        # If not blocked, proceed to the phone step.
         phone_button = [[KeyboardButton("اضغط هنا لمشاركة رقم هاتفك", request_contact=True)]]
         await update.message.reply_text(
             "تم التحقق من جهازك بنجاح! الآن، من فضلك شارك رقم هاتفك لإكمال العملية.",
@@ -804,11 +802,13 @@ async def handle_admin_inspect_request(query: CallbackQuery, context: ContextTyp
     context.user_data['state'] = State.AWAITING_INSPECT_USER_ID
     await query.edit_message_text(text="🔍 الرجاء إرسال الـ ID الرقمي للمستخدم الذي تريد فحص إحالاته.")
 
-async def display_target_referrals_log(message: Message, query: Optional[CallbackQuery], context: ContextTypes.DEFAULT_TYPE, target_user_id: int, log_type: str, page: int) -> None:
+async def display_target_referrals_log(message: Optional[Message], query: Optional[CallbackQuery], context: ContextTypes.DEFAULT_TYPE, target_user_id: int, log_type: str, page: int) -> None:
     if query:
         await query.edit_message_text(Messages.LOADING)
-    else: # From a text message
+    elif message:
         await message.reply_text(Messages.LOADING)
+    else:
+        return
 
     real_ids, fake_ids = await get_my_referrals_details(target_user_id)
     target_mention = await get_user_mention(target_user_id, context)
@@ -854,11 +854,9 @@ async def display_target_referrals_log(message: Message, query: Optional[Callbac
         keyboard_list.append([toggle_button])
         keyboard_list.append([InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data=Callback.ADMIN_PANEL.value)])
         keyboard = InlineKeyboardMarkup(keyboard_list)
-
-    if query:
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard, disable_web_page_preview=True)
-    else:
-        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard, disable_web_page_preview=True)
+    
+    final_message_target = query.message if query else message
+    await final_message_target.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard, disable_web_page_preview=True)
 
 
 async def handle_inspect_log_pagination(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -897,11 +895,11 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             target_user_id = int(text)
             target_user_info = await get_user_from_db(target_user_id)
             if not target_user_info:
-                await update.message.reply_text(Messages.USER_NOT_FOUND)
+                await update.message.reply_text(Messages.USER_NOT_FOUND, reply_markup=get_admin_panel_keyboard())
             else:
                 await display_target_referrals_log(update.message, None, context, target_user_id, 'real', 1)
         except (ValueError, TypeError):
-            await update.message.reply_text(Messages.INVALID_INPUT)
+            await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
         finally:
             context.user_data.clear()
         return
@@ -1021,14 +1019,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     action = query.data
 
-    # User-facing buttons
     if action == Callback.MAIN_MENU.value: await query.edit_message_text(text=Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(query.from_user.id))
     elif action == Callback.MY_REFERRALS.value: await handle_button_press_my_referrals(query)
     elif action == Callback.MY_LINK.value: await handle_button_press_link(query, context)
     elif action == Callback.TOP_5.value: await handle_button_press_top5(query, context)
     elif action == Callback.CONFIRM_JOIN.value: await handle_confirm_join(query, context)
-    
-    # Admin Panel buttons
     elif action == Callback.ADMIN_PANEL.value: await handle_admin_panel(query)
     elif action == Callback.ADMIN_USER_COUNT.value: await handle_admin_user_count(query)
     elif action == Callback.ADMIN_BOOO_MENU.value: await handle_booo_menu(query)
@@ -1042,8 +1037,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif action == Callback.ADMIN_FORMAT_CONFIRM.value: await handle_admin_format_confirm(query)
     elif action == Callback.ADMIN_FORCE_REVERIFICATION.value: await handle_force_reverification(query)
     elif action == Callback.ADMIN_INSPECT_REFERRALS.value: await handle_admin_inspect_request(query, context)
-    
-    # Other actions
     elif action in [c.value for c in [Callback.USER_ADD_REAL, Callback.USER_REMOVE_REAL, Callback.USER_ADD_FAKE, Callback.USER_REMOVE_FAKE]]: await handle_user_edit_action(query, context)
     elif action.startswith(f"{Callback.REPORT_PAGE.value}_"): await handle_report_pagination(query, context)
     elif action.startswith(f"{Callback.INSPECT_LOG.value}_"): await handle_inspect_log_pagination(query, context)
