@@ -38,7 +38,6 @@ from supabase import Client, create_client
 
 # --- Configuration ---
 class Config:
-    # FIX: Updated BOT_TOKEN to match the one from the logs
     BOT_TOKEN = "7950170561:AAH5OtiK38BBhAnVofqxnLWRYbaZaIaKY4s"
     SUPABASE_URL = "https://jofxsqsgarvzolgphqjg.supabase.co"
     SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvZnhzcXNnYXJ2em9sZ3BocWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTU5NTI4NiwiZXhwIjoyMDY1MTcxMjg2fQ.egB9qticc7ABgo6vmpsrPi3cOHooQmL5uQOKI4Jytqg"
@@ -309,7 +308,8 @@ async def is_user_in_channel(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
     """Checks if a user is a member of the channel."""
     try:
         member = await context.bot.get_chat_member(chat_id=Config.CHANNEL_ID, user_id=user_id)
-        return member.status in {ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.CREATOR}
+        # FIX: Corrected CREATOR to OWNER
+        return member.status in {ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER}
     except BadRequest as e:
         if "user not found" in str(e).lower():
             return False
@@ -493,8 +493,9 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
     if chat_id != Config.CHANNEL_ID:
         return
 
-    was_member = result.old_chat_member.status in {ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.CREATOR}
-    is_member = result.new_chat_member.status in {ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.CREATOR}
+    # FIX: Corrected CREATOR to OWNER
+    was_member = result.old_chat_member.status in {ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER}
+    is_member = result.new_chat_member.status in {ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER}
 
     logger.info(f"Chat member update for user {user.id} in chat {chat_id}. Was member: {was_member}, Is member: {is_member}")
 
