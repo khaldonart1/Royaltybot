@@ -305,9 +305,11 @@ async def modify_referral_count(user_id: int, real_delta: int = 0, fake_delta: i
     return await get_user_from_db(user_id)
 
 async def is_user_in_channel(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Checks if a user is a member of the channel."""
     try:
         member = await context.bot.get_chat_member(chat_id=Config.CHANNEL_ID, user_id=user_id)
-        return member.status in {member.MEMBER, member.ADMINISTRATOR, member.CREATOR}
+        # FIX: Use ChatMember class constants, not instance attributes
+        return member.status in {ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.CREATOR}
     except BadRequest as e:
         if "user not found" in str(e).lower():
             return False
@@ -336,7 +338,7 @@ def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
 def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 تقرير حقيقي", callback_data=f"{Callback.REPORT_PAGE}_real_page_1"), InlineKeyboardButton("⏳ تقرير وهمي", callback_data=f"{Callback.REPORT_PAGE}_fake_page_1")],
-        [InlineKeyboardButton("� فحص إحالات مستخدم", callback_data=Callback.ADMIN_INSPECT_REFERRALS)],
+        [InlineKeyboardButton("🔍 فحص إحالات مستخدم", callback_data=Callback.ADMIN_INSPECT_REFERRALS)],
         [InlineKeyboardButton("👥 عدد المستخدمين", callback_data=Callback.ADMIN_USER_COUNT)],
         [InlineKeyboardButton("Booo 👾 (تعديل يدوي)", callback_data=Callback.ADMIN_BOOO_MENU)],
         [InlineKeyboardButton("📢 إذاعة للموثقين", callback_data=Callback.ADMIN_BROADCAST)],
@@ -478,7 +480,6 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
 
     logger.info(f"Chat member update for user {user.id} in chat {chat_id}. Was member: {was_member}, Is member: {is_member}")
 
-    # FIX: Handle user joining the channel
     if not was_member and is_member:
         logger.info(f"User {user.id} joined channel {chat_id}.")
         # This part is now automatically handled by the join confirmation button,
@@ -486,7 +487,6 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
         # For now, the user must still press the "Confirm Join" button to finalize verification.
         pass # Let the CONFIRM_JOIN callback handle the final verification step.
 
-    # FIX: Handle user leaving or being kicked
     elif was_member and not is_member:
         logger.info(f"User {user.id} left/was kicked from chat {chat_id}.")
         db_user = await get_user_from_db(user.id)
