@@ -34,6 +34,14 @@
             max-width: 400px;
             width: 90%;
         }
+        
+        /* --- تنسيق الشعار --- */
+        .logo {
+            max-width: 200px; 
+            height: auto;
+            margin-bottom: 20px;
+            border-radius: 50%; /* تم جعله دائرياً ليتناسب مع شكل الشعار */
+        }
 
         h1 {
             color: var(--tg-theme-text-color, #111111);
@@ -49,7 +57,7 @@
 
         button {
             font-family: 'Cairo', sans-serif;
-            background-color: var(--tg-theme-button-color, #007bff);
+            background-color: var(--tg-theme-button-color, #00a651); /* تم تغيير اللون هنا */
             color: var(--tg-theme-button-text-color, #ffffff);
             border: none;
             padding: 15px 30px;
@@ -74,11 +82,18 @@
             margin-top: 20px;
             font-weight: bold;
         }
+        .error {
+            color: var(--tg-theme-destructive-text-color, #d9534f);
+        }
     </style>
 </head>
 <body>
 
     <div class="container">
+        
+        <!-- --- تم تحديث رابط الشعار إلى الرابط الصحيح --- -->
+        <img src="https://i.postimg.cc/Jh5QmkSt/Business.png" alt="شعار" class="logo">
+
         <h1>التحقق من الجهاز</h1>
         <p>لمنع إساءة استخدام نظام الدعوات، نحتاج للتأكد من جهازك. يرجى الضغط على الزر أدناه للمتابعة.</p>
         <button id="verifyButton">اضغط هنا للتحقق</button>
@@ -90,40 +105,34 @@
         const verifyButton = document.getElementById('verifyButton');
         const statusElement = document.getElementById('status');
         
-        // Initialize FingerprintJS
-        const fpPromise = FingerprintJS.load();
-
         // Initialize the Telegram Web App
         tg.ready();
-        // Expand the web app to full height for better user experience
         tg.expand();
         
         verifyButton.addEventListener('click', () => {
             statusElement.textContent = 'جاري إنشاء بصمة آمنة لجهازك...';
             verifyButton.disabled = true;
 
-            // Get the unique visitor identifier
-            fpPromise
-                .get()
+            // Load FingerprintJS and generate the visitorId
+            FingerprintJS.load()
+                .then(fp => fp.get())
                 .then(result => {
                     const visitorId = result.visitorId;
-                    
                     statusElement.textContent = 'تم إنشاء البصمة بنجاح! جاري الإرسال...';
-
-                    // Send the powerful fingerprint as the device_id back to the bot
+                    
+                    // Send the data to the bot
                     tg.sendData(JSON.stringify({ device_id: visitorId }));
                     
-                    // We can close the web app after a short delay
+                    // Close the Web App after a short delay
                     setTimeout(() => {
-                         tg.close();
-                    }, 1000);
+                        tg.close();
+                    }, 1500); // Increased delay slightly
                 })
                 .catch(error => {
                     console.error('FingerprintJS error:', error);
-                    statusElement.textContent = 'حدث خطأ أثناء إنشاء البصمة. يرجى المحاولة مرة أخرى.';
+                    statusElement.innerHTML = '<span class="error">فشل التحقق. قد يكون متصفحك يمنع جمع البيانات اللازمة. حاول مرة أخرى أو استخدم متصفحًا آخر.</span>';
                     verifyButton.disabled = false;
-                    // Inform the user about the error via an alert
-                    tg.showAlert('فشل التحقق. يرجى التأكد من أن متصفحك لا يحظر الخصائص اللازمة والمحاولة مرة أخرى.');
+                    tg.showAlert('فشل التحقق. قد يكون متصفحك يمنع جمع البيانات اللازمة. حاول مرة أخرى أو استخدم متصفحًا آخر.');
                 });
         });
     </script>
