@@ -442,7 +442,7 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     logger.info(f"Received device_id {device_id} for user {user_id}. Verifying uniqueness...")
     try:
-        device_usage_res = await run_sync_db(lambda: supabase.table('referrals').select('referred_user_id').eq('device_id', device_id).neq('referred_user_id', user_id).limit(1).execute())
+        device_usage_res = await run_sync_db(lambda: supabase.table('referrals').select('referred_user_id').eq('device_id', device_id).neq('referred_user_id', user_id).limit(0).execute())
         if device_usage_res.data:
             original_user_id = device_usage_res.data[0].get('referred_user_id')
             logger.warning(f"Abuse: User {user_id} trying to use device {device_id} already registered to {original_user_id}.")
