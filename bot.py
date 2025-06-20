@@ -796,7 +796,8 @@ async def display_target_referrals_log(message: Optional[Message], query: Option
         start_index, end_index = (page - 1) * Config.USERS_PER_PAGE, page * Config.USERS_PER_PAGE
         page_ids = id_list[start_index:end_index]
         mentions = await asyncio.gather(*[get_user_mention(uid, context) for uid in page_ids])
-        user_list_text = "\n".join(f"• {mention} (`{uid}`)" for mention, uid in zip(mentions, page_ids))
+        # Escape user IDs for MarkdownV2
+        user_list_text = "\n".join(f"• {mention} (`{clean_name_for_markdown(str(uid))}`)" for mention, uid in zip(mentions, page_ids))
         text = f"📜 *سجل إحالات المستخدم {target_mention}*\n\n{title} (صفحة {page}):\n{user_list_text}"
 
     keyboard_list = []
@@ -808,7 +809,7 @@ async def display_target_referrals_log(message: Optional[Message], query: Option
     toggle_button = InlineKeyboardButton("عرض الوهمية ⏳", callback_data=f"{Callback.INSPECT_LOG}_{target_user_id}_fake_1") if log_type == 'real' else InlineKeyboardButton("عرض الحقيقية ✅", callback_data=f"{Callback.INSPECT_LOG}_{target_user_id}_real_1")
     keyboard_list.append([toggle_button])
     keyboard_list.append([InlineKeyboardButton("🔙 العودة", callback_data=Callback.ADMIN_PANEL)])
-    await target.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard_list), disable_web_page_preview=True)
+    await target.edit_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard_list), disable_web_page_preview=True)
 
 async def handle_inspect_log_pagination(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
