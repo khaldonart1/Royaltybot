@@ -45,7 +45,6 @@ class Config:
     CHANNEL_ID = -1002686156311
     CHANNEL_URL = "https://t.me/Ry_Hub"
     BOT_OWNER_IDS = {596472053, 7164133014, 1971453570}
-    # MODIFICATION: Re-added country codes for phone verification
     ALLOWED_COUNTRY_CODES = {
         "213", "973", "269", "253", "20", "964", "962", "965", "961",
         "218", "222", "212", "968", "970", "974", "966", "252", "249",
@@ -94,7 +93,6 @@ class Messages:
     VERIFIED_WELCOME = "أهلاً بك مجدداً! ✅\n\nاستخدم الأزرار أو الأوامر للتفاعل مع البوت."
     START_WELCOME = "أهلاً بك في البوت! 👋\n\nللبدء، نحتاج للتحقق من جهازك. الرجاء الضغط على الزر أدناه."
     WEB_VERIFY_PROMPT = "للتحقق من أنك لا تستخدم نفس الجهاز عدة مرات، الرجاء الضغط على الزر أدناه."
-    # MODIFICATION: Re-added phone-related messages
     PHONE_PROMPT = "تم التحقق من جهازك بنجاح! الآن، من فضلك شارك رقم هاتفك لإكمال العملية."
     PHONE_SUCCESS = "تم استلام الرقم بنجاح."
     PHONE_INVALID = "الرجاء مشاركة جهة الاتصال الخاصة بك فقط."
@@ -133,30 +131,54 @@ except Exception as e:
 def escape_markdown(text: str) -> str:
     """Escapes characters for Markdown parsing."""
     if not text: return ""
-    # Escape characters for ParseMode.MARKDOWN
     escape_chars = r'([_*\[\]()~`>#\+\-=|{}\.!])'
     return re.sub(escape_chars, r'\\\1', text)
 
+# --- MAJOR FIX: Rewrote get_user_mention to be highly resilient ---
 async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Gets a Markdown-safe user mention, using a cache to reduce API calls."""
+    """
+    Gets a Markdown-safe user mention, using a cache. 
+    This function is designed to never fail and always return a valid string.
+    """
+    try:
+        user_id = int(user_id)
+    except (ValueError, TypeError):
+        logger.error(f"get_user_mention called with invalid user_id type: {user_id}")
+        return "[مستخدم غير صالح]"
+
     cache = context.bot_data.setdefault('mention_cache', {})
     current_time = time.time()
+
     if user_id in cache and (current_time - cache[user_id].get('timestamp', 0) < Config.MENTION_CACHE_TTL_SECONDS):
         return cache[user_id]['mention']
+
+    mention = f"[مستخدم غير معروف {user_id}](tg://user?id={user_id})"  # Default fallback
+
     try:
-        chat = await context.bot.get_chat(user_id)
-        full_name = escape_markdown(chat.full_name or f"User {user_id}")
-        mention = f"[{full_name}](tg://user?id={user_id})"
-    except (TelegramError, BadRequest):
-        db_user_info = await get_user_from_db(user_id)
-        full_name = "Unknown User"
-        if db_user_info and db_user_info.get("full_name"):
-            full_name = escape_markdown(db_user_info.get("full_name"))
-        else:
-            full_name = f"User {user_id}"
-        mention = f"[{full_name}](tg://user?id={user_id})"
+        # 1. Try to get from Telegram API
+        try:
+            chat = await context.bot.get_chat(user_id)
+            full_name = escape_markdown(chat.full_name or f"User {user_id}")
+            mention = f"[{full_name}](tg://user?id={user_id})"
+        except (BadRequest, TelegramError) as e:
+            # 2. If API fails, try to get from our database
+            logger.warning(f"API failed for {user_id}: {e}. Falling back to DB.")
+            db_user_info = await get_user_from_db(user_id)
+            if db_user_info and db_user_info.get("full_name"):
+                full_name = escape_markdown(db_user_info.get("full_name"))
+                mention = f"[{full_name}](tg://user?id={user_id})"
+            else:
+                logger.warning(f"No name for user {user_id} in API or DB.")
+                # The default mention is already set
+    except Exception as e:
+        # 3. Catch any other unexpected error and log it
+        logger.error(f"Critical error in get_user_mention for {user_id}: {e}", exc_info=True)
+        # Fallback to the safest default value
+        mention = f"[مستخدم غير معروف {user_id}](tg://user?id={user_id})"
+    
     cache[user_id] = {'mention': mention, 'timestamp': current_time}
     return mention
+
 
 # --- Database Functions ---
 async def run_sync_db(func: Callable[[], Any]) -> Any:
@@ -328,7 +350,7 @@ async def is_user_in_channel(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
 # --- Keyboard Functions ---
 def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton("إحصائياتي 📊", callback_data=Callback.MY_REFERRALS)],
+        [InlineKeyboardButton("إحصائياتي �", callback_data=Callback.MY_REFERRALS)],
         [InlineKeyboardButton("رابطي 🔗", callback_data=Callback.MY_LINK)],
         [InlineKeyboardButton("🏆 أفضل 5 متسابقين", callback_data=Callback.TOP_5)],
     ]
@@ -459,7 +481,6 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         await add_referral_mapping_in_db(user_id, referrer_id, device_id)
         
-        # MODIFICATION: Reverted to asking for phone number
         phone_button = [[KeyboardButton("اضغط هنا لمشاركة رقم هاتفك", request_contact=True)]]
         await update.message.reply_text(Messages.PHONE_PROMPT, reply_markup=ReplyKeyboardMarkup(phone_button, resize_keyboard=True, one_time_keyboard=True))
         
@@ -467,7 +488,6 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"Error in web_app_data_handler for user {user_id}: {e}", exc_info=True)
         await update.message.reply_text(Messages.GENERIC_ERROR, reply_markup=ReplyKeyboardRemove())
 
-# MODIFICATION: Re-added handle_contact function
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.contact or update.effective_chat.type != Chat.PRIVATE: return
     user_id = update.effective_user.id
@@ -531,7 +551,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
     logger.info(f"Admin {user_id} sent message in state {state}: {text}")
     if not state or not text: return
 
-    context.user_data.pop('state', None) # Clear state after processing
+    context.user_data.pop('state', None)
 
     if state == State.AWAITING_BROADCAST_MESSAGE: await handle_broadcast_message(update, context)
     elif state == State.AWAITING_UNIVERSAL_BROADCAST_MESSAGE: await handle_universal_broadcast_message(update, context)
@@ -680,7 +700,6 @@ async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.D
         
         all_users = await get_all_users_from_db()
 
-        # FIX: Added a check to ensure user_id exists before processing
         if report_type == 'real':
             filtered_users = sorted([u for u in all_users if u.get('user_id') and u.get('total_real', 0) > 0], key=lambda x: x.get('total_real', 0), reverse=True)
             title, count_key = "✅ *تقرير الإحالات الحقيقية*", 'total_real'
@@ -729,7 +748,7 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
             sent += 1
         except TelegramError as e:
             logger.error(f"Failed broadcast to {user['user_id']}: {e}"); failed += 1
-        await asyncio.sleep(0.05) # Small delay
+        await asyncio.sleep(0.05)
     await update.message.reply_text(f"✅ اكتملت الإذاعة!\n\nتم الإرسال إلى: {sent}\nفشل الإرسال: {failed}")
 
 async def handle_admin_universal_broadcast(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -749,7 +768,7 @@ async def handle_universal_broadcast_message(update: Update, context: ContextTyp
             sent += 1
         except TelegramError as e:
             logger.error(f"Failed universal broadcast to {user['user_id']}: {e}"); failed += 1
-        await asyncio.sleep(0.05) # Small delay
+        await asyncio.sleep(0.05)
     await update.message.reply_text(f"✅ اكتملت الإذاعة الشاملة!\n\nتم الإرسال إلى: {sent}\nفشل الإرسال: {failed}")
 
 async def handle_booo_menu(query: CallbackQuery) -> None:
@@ -961,7 +980,6 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(button_handler), group=1)
 
     private_filter = filters.ChatType.PRIVATE
-    # MODIFICATION: Re-added contact handler
     application.add_handler(MessageHandler(filters.CONTACT & private_filter, handle_contact), group=2)
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA & private_filter, web_app_data_handler), group=2)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_filter, handle_admin_messages), group=2)
