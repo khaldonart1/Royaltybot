@@ -134,7 +134,6 @@ def escape_markdown(text: str) -> str:
     escape_chars = r'([_*\[\]()~`>#\+\-=|{}\.!])'
     return re.sub(escape_chars, r'\\\1', text)
 
-# --- MAJOR FIX: Rewrote get_user_mention to be highly resilient ---
 async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
     """
     Gets a Markdown-safe user mention, using a cache. 
@@ -152,28 +151,20 @@ async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
     if user_id in cache and (current_time - cache[user_id].get('timestamp', 0) < Config.MENTION_CACHE_TTL_SECONDS):
         return cache[user_id]['mention']
 
-    mention = f"[مستخدم غير معروف {user_id}](tg://user?id={user_id})"  # Default fallback
+    mention = f"[مستخدم غير معروف {user_id}](tg://user?id={user_id})"
 
     try:
-        # 1. Try to get from Telegram API
         try:
             chat = await context.bot.get_chat(user_id)
             full_name = escape_markdown(chat.full_name or f"User {user_id}")
             mention = f"[{full_name}](tg://user?id={user_id})"
-        except (BadRequest, TelegramError) as e:
-            # 2. If API fails, try to get from our database
-            logger.warning(f"API failed for {user_id}: {e}. Falling back to DB.")
+        except (BadRequest, TelegramError):
             db_user_info = await get_user_from_db(user_id)
             if db_user_info and db_user_info.get("full_name"):
                 full_name = escape_markdown(db_user_info.get("full_name"))
                 mention = f"[{full_name}](tg://user?id={user_id})"
-            else:
-                logger.warning(f"No name for user {user_id} in API or DB.")
-                # The default mention is already set
     except Exception as e:
-        # 3. Catch any other unexpected error and log it
         logger.error(f"Critical error in get_user_mention for {user_id}: {e}", exc_info=True)
-        # Fallback to the safest default value
         mention = f"[مستخدم غير معروف {user_id}](tg://user?id={user_id})"
     
     cache[user_id] = {'mention': mention, 'timestamp': current_time}
@@ -230,9 +221,10 @@ async def get_my_referrals_details(user_id: int) -> Tuple[List[int], List[int]]:
     try:
         all_refs_res = await run_sync_db(lambda: supabase.table('referrals').select('referred_user_id').eq('referrer_user_id', user_id).execute())
         if not all_refs_res.data: return [], []
-        referred_ids = [ref['referred_user_id'] for ref in all_refs_res.data]
+        referred_ids = [ref['referred_user_id'] for ref in all_refs_res.data if ref and 'referred_user_id' in ref]
+        if not referred_ids: return [], []
         verified_status_res = await run_sync_db(lambda: supabase.table('users').select('user_id, is_verified').in_('user_id', referred_ids).execute())
-        verified_map = {u['user_id']: u.get('is_verified', False) for u in verified_status_res.data}
+        verified_map = {u['user_id']: u.get('is_verified', False) for u in verified_status_res.data if u and 'user_id' in u}
         real_referrals = sorted([uid for uid in referred_ids if verified_map.get(uid, False)])
         fake_referrals = sorted([uid for uid in referred_ids if not verified_map.get(uid, False)])
         return real_referrals, fake_referrals
@@ -285,7 +277,9 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
         if not all_users:
             return msg + "لم يصل أحد إلى القائمة بعد.\n\n---\n*ترتيبك الشخصي:*\nلا يمكن عرض ترتيبك حالياً."
 
-        full_sorted_list = sorted([u for u in all_users if u.get('total_real', 0) > 0], key=lambda u: u.get('total_real', 0), reverse=True)
+        # FINAL FIX: Added data integrity check
+        sane_users = [u for u in all_users if isinstance(u, dict) and u.get('user_id')]
+        full_sorted_list = sorted([u for u in sane_users if u.get('total_real', 0) > 0], key=lambda u: u.get('total_real', 0), reverse=True)
         top_5_users = full_sorted_list[:5]
 
         if not top_5_users:
@@ -350,7 +344,7 @@ async def is_user_in_channel(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
 # --- Keyboard Functions ---
 def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton("إحصائياتي �", callback_data=Callback.MY_REFERRALS)],
+        [InlineKeyboardButton("إحصائياتي 📊", callback_data=Callback.MY_REFERRALS)],
         [InlineKeyboardButton("رابطي 🔗", callback_data=Callback.MY_LINK)],
         [InlineKeyboardButton("🏆 أفضل 5 متسابقين", callback_data=Callback.TOP_5)],
     ]
@@ -700,11 +694,14 @@ async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.D
         
         all_users = await get_all_users_from_db()
 
+        # FINAL FIX: Add a robust check for data integrity before filtering and sorting.
+        sane_users = [u for u in all_users if isinstance(u, dict) and u.get('user_id')]
+
         if report_type == 'real':
-            filtered_users = sorted([u for u in all_users if u.get('user_id') and u.get('total_real', 0) > 0], key=lambda x: x.get('total_real', 0), reverse=True)
+            filtered_users = sorted([u for u in sane_users if u.get('total_real', 0) > 0], key=lambda x: x.get('total_real', 0), reverse=True)
             title, count_key = "✅ *تقرير الإحالات الحقيقية*", 'total_real'
         else: # 'fake'
-            filtered_users = sorted([u for u in all_users if u.get('user_id') and u.get('total_fake', 0) > 0], key=lambda x: x.get('total_fake', 0), reverse=True)
+            filtered_users = sorted([u for u in sane_users if u.get('total_fake', 0) > 0], key=lambda x: x.get('total_fake', 0), reverse=True)
             title, count_key = "⏳ *تقرير الإحالات الوهمية*", 'total_fake'
 
         if not filtered_users:
@@ -848,8 +845,10 @@ async def handle_data_migration(query: CallbackQuery, context: ContextTypes.DEFA
         if not all_users:
             await query.edit_message_text("لا يوجد مستخدمون لإعادة حساب بياناتهم.", reply_markup=get_admin_panel_keyboard()); return
 
-        verified_ids = {u['user_id'] for u in all_users if u.get('is_verified')}
-        user_counts = {u['user_id']: {'total_real': 0, 'total_fake': 0} for u in all_users}
+        # FINAL FIX: Added data integrity check
+        sane_users = [u for u in all_users if isinstance(u, dict) and u.get('user_id')]
+        verified_ids = {u['user_id'] for u in sane_users if u.get('is_verified')}
+        user_counts = {u['user_id']: {'total_real': 0, 'total_fake': 0} for u in sane_users}
 
         for mapping in (all_mappings_res.data or []):
             ref_id, red_id = mapping.get('referrer_user_id'), mapping.get('referred_user_id')
