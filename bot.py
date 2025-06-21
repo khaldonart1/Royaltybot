@@ -88,6 +88,7 @@ class Callback(str, Enum):
     ADMIN_UNIVERSAL_BROADCAST = "admin_universal_broadcast"
     ADMIN_INSPECT_REFERRALS = "admin_inspect_referrals"
     INSPECT_LOG = "inspect_log"
+    INSPECT_SUMMARY = "inspect_summary"
 
 # --- Bot Messages (User-facing text in Arabic) ---
 class Messages:
@@ -350,6 +351,14 @@ def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ العودة للقائمة الرئيسية", callback_data=Callback.MAIN_MENU)],
     ])
 
+def get_inspect_summary_keyboard(target_user_id: int) -> InlineKeyboardMarkup:
+    """Gets the keyboard for the user inspection summary screen."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ عرض الإحالات الحقيقية", callback_data=f"{Callback.INSPECT_LOG}:{target_user_id}:real:1")],
+        [InlineKeyboardButton("⏳ عرض الإحالات الوهمية", callback_data=f"{Callback.INSPECT_LOG}:{target_user_id}:fake:1")],
+        [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data=Callback.ADMIN_PANEL)]
+    ])
+
 def get_user_edit_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ إضافة حقيقي", callback_data=Callback.USER_ADD_REAL), InlineKeyboardButton("➖ خصم حقيقي", callback_data=Callback.USER_REMOVE_REAL)],
@@ -526,12 +535,7 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
     elif state == State.AWAITING_INSPECT_USER_ID:
         try:
             target_user_id = int(text)
-            target_user_info = await get_user_from_db(target_user_id)
-            if not target_user_info:
-                await update.message.reply_text(Messages.USER_NOT_FOUND, reply_markup=get_admin_panel_keyboard())
-            else:
-                # Start with the 'real' report by default
-                await display_target_referrals_log(update.message, None, context, target_user_id, 'real', 1)
+            await display_inspect_summary(update.message, None, context, target_user_id)
         except (ValueError, TypeError):
             await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
         finally:
@@ -716,6 +720,36 @@ async def display_report_page(query: CallbackQuery, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"Error generating report page: {e}", exc_info=True)
         await query.edit_message_text(Messages.GENERIC_ERROR, reply_markup=get_admin_panel_keyboard())
+
+
+async def display_inspect_summary(message: Optional[Message], query: Optional[CallbackQuery], context: ContextTypes.DEFAULT_TYPE, target_user_id: int):
+    """Displays a summary of a user's referrals before showing the detailed log."""
+    action_requester = query if query else message
+    if not action_requester: return
+
+    try:
+        if query: await query.edit_message_text(Messages.LOADING)
+
+        target_user_info = await get_user_from_db(target_user_id)
+        if not target_user_info:
+            error_text = Messages.USER_NOT_FOUND
+            if message: await message.reply_text(error_text, reply_markup=get_admin_panel_keyboard())
+            elif query: await query.edit_message_text(error_text, reply_markup=get_admin_panel_keyboard())
+            return
+
+        mention = await get_user_mention(target_user_id, context)
+        stats_text = get_referral_stats_text(target_user_info)
+        summary_text = f"🔎 <b>ملخص فحص المستخدم:</b> {mention}\n\n{stats_text}"
+
+        keyboard = get_inspect_summary_keyboard(target_user_id)
+        if message: await message.reply_text(summary_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        elif query: await query.edit_message_text(summary_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Error displaying inspect summary for {target_user_id}: {e}", exc_info=True)
+        error_text = Messages.GENERIC_ERROR
+        if message: await message.reply_text(error_text, reply_markup=get_admin_panel_keyboard())
+        elif query: await query.edit_message_text(error_text, reply_markup=get_admin_panel_keyboard())
 
 
 async def display_target_referrals_log(message: Optional[Message], query: Optional[CallbackQuery], context: ContextTypes.DEFAULT_TYPE, target_user_id: int, report_type: str, page: int):
