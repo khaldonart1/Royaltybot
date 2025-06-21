@@ -350,14 +350,11 @@ def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ العودة للقائمة الرئيسية", callback_data=Callback.MAIN_MENU)],
     ])
 
-def get_booo_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("✍️ تعديل إحصائيات مستخدم", callback_data=Callback.ADMIN_USER_EDIT_MENU)], [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data=Callback.ADMIN_PANEL)]])
-
 def get_user_edit_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ إضافة حقيقي", callback_data=Callback.USER_ADD_REAL), InlineKeyboardButton("➖ خصم حقيقي", callback_data=Callback.USER_REMOVE_REAL)],
         [InlineKeyboardButton("➕ إضافة وهمي", callback_data=Callback.USER_ADD_FAKE), InlineKeyboardButton("➖ خصم وهمي", callback_data=Callback.USER_REMOVE_FAKE)],
-        [InlineKeyboardButton("🔙 العودة", callback_data=Callback.ADMIN_BOOO_MENU)]
+        [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data=Callback.ADMIN_PANEL)]
     ])
 
 def get_reset_confirmation_keyboard() -> InlineKeyboardMarkup:
@@ -897,10 +894,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
                 await display_report_page(query, context, report_type, int(page_str))
             except (ValueError, IndexError) as e: logger.error(f"Could not parse report callback data '{data}': {e}")
         elif data == Callback.ADMIN_USER_COUNT: await handle_admin_user_count(query)
-        elif data == Callback.ADMIN_BOOO_MENU: await query.edit_message_text("👾 قائمة التعديل اليدوي:", reply_markup=get_booo_menu_keyboard())
-        elif data == Callback.ADMIN_USER_EDIT_MENU:
-            context.user_data['state'] = State.AWAITING_EDIT_USER_ID
-            await query.edit_message_text("✍️ <b>تعديل إحصائيات مستخدم</b>\n\nالرجاء إرسال ID المستخدم الذي تريد تعديل إحصائياته.", parse_mode=ParseMode.HTML)
+        elif data == Callback.ADMIN_BOOO_MENU: await query.edit_message_text("👾 اختر الإجراء المطلوب:", reply_markup=get_user_edit_keyboard())
         elif data in {Callback.USER_ADD_REAL, Callback.USER_REMOVE_REAL, Callback.USER_ADD_FAKE, Callback.USER_REMOVE_FAKE}:
             context.user_data['action_type'] = data
             context.user_data['state'] = State.AWAITING_EDIT_USER_ID
