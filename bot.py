@@ -45,7 +45,12 @@ class Config:
     CHANNEL_ID = -1002686156311
     CHANNEL_URL = "https://t.me/Ry_Hub"
     BOT_OWNER_IDS = {596472053, 7164133014, 1971453570}
-    # REMOVED: ALLOWED_COUNTRY_CODES is no longer needed.
+    # MODIFICATION: Re-added country codes for phone verification
+    ALLOWED_COUNTRY_CODES = {
+        "213", "973", "269", "253", "20", "964", "962", "965", "961",
+        "218", "222", "212", "968", "970", "974", "966", "252", "249",
+        "963", "216", "971", "967"
+    }
     USERS_PER_PAGE = 15
     MENTION_CACHE_TTL_SECONDS = 300
 
@@ -89,7 +94,11 @@ class Messages:
     VERIFIED_WELCOME = "أهلاً بك مجدداً! ✅\n\nاستخدم الأزرار أو الأوامر للتفاعل مع البوت."
     START_WELCOME = "أهلاً بك في البوت! 👋\n\nللبدء، نحتاج للتحقق من جهازك. الرجاء الضغط على الزر أدناه."
     WEB_VERIFY_PROMPT = "للتحقق من أنك لا تستخدم نفس الجهاز عدة مرات، الرجاء الضغط على الزر أدناه."
-    # REMOVED: Phone-related messages are no longer needed.
+    # MODIFICATION: Re-added phone-related messages
+    PHONE_PROMPT = "تم التحقق من جهازك بنجاح! الآن، من فضلك شارك رقم هاتفك لإكمال العملية."
+    PHONE_SUCCESS = "تم استلام الرقم بنجاح."
+    PHONE_INVALID = "الرجاء مشاركة جهة الاتصال الخاصة بك فقط."
+    COUNTRY_NOT_ALLOWED = "عذراً، هذا البوت مخصص فقط للمستخدمين من الدول العربية. رقمك غير مدعوم."
     JOIN_PROMPT = "ممتاز! الخطوة الأخيرة هي الانضمام إلى قناتنا. انضم ثم اضغط على الزر أدناه."
     JOIN_SUCCESS = "تهانينا! لقد تم التحقق منك بنجاح."
     JOIN_FAIL = "❌ لم تنضم بعد. الرجاء الانضمام إلى القناة ثم حاول مرة أخرى."
@@ -122,10 +131,10 @@ except Exception as e:
 
 # --- Helper Functions ---
 def escape_markdown(text: str) -> str:
-    """Escapes characters for Markdown parsing (more forgiving version)."""
+    """Escapes characters for Markdown parsing."""
     if not text: return ""
-    # For ParseMode.MARKDOWN, we mainly need to escape these characters.
-    escape_chars = r'([_*\[\]()~`>#\+\-=|{}\.!\\])' # Kept the comprehensive list for safety with names
+    # Escape characters for ParseMode.MARKDOWN
+    escape_chars = r'([_*\[\]()~`>#\+\-=|{}\.!])'
     return re.sub(escape_chars, r'\\\1', text)
 
 async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -136,14 +145,15 @@ async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
         return cache[user_id]['mention']
     try:
         chat = await context.bot.get_chat(user_id)
-        # FIX: Use the new escape_markdown function
         full_name = escape_markdown(chat.full_name or f"User {user_id}")
         mention = f"[{full_name}](tg://user?id={user_id})"
     except (TelegramError, BadRequest):
         db_user_info = await get_user_from_db(user_id)
         full_name = "Unknown User"
-        if db_user_info:
-            full_name = escape_markdown(db_user_info.get("full_name", f"User {user_id}"))
+        if db_user_info and db_user_info.get("full_name"):
+            full_name = escape_markdown(db_user_info.get("full_name"))
+        else:
+            full_name = f"User {user_id}"
         mention = f"[{full_name}](tg://user?id={user_id})"
     cache[user_id] = {'mention': mention, 'timestamp': current_time}
     return mention
@@ -263,7 +273,6 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
             for i, u_info in enumerate(top_5_users):
                 mention = mentions[i]
                 count = u_info.get('total_real', 0)
-                # FIX: Switched to ParseMode.MARKDOWN, no need to escape '.' or '-'
                 msg += f"{i+1}. {mention} - *{count}* إحالة\n"
 
         msg += "\n---\n*ترتيبك الشخصي:*\n"
@@ -272,15 +281,12 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
         rank_str = "غير مصنف"
         if user_index != -1:
             my_info = full_sorted_list[user_index]
-            # FIX: No need to escape '#'
             rank_str = f"#{user_index + 1}"
             my_referrals = my_info.get('total_real', 0)
         else:
-            # Fallback to get user's own data if not in the sorted list
             my_info = await get_user_from_db(user_id)
             if my_info: my_referrals = my_info.get('total_real', 0)
 
-        # FIX: No need to escape '.' at the end
         msg += f"🎖️ ترتيبك: *{rank_str}*\n✅ رصيدك: *{my_referrals}* إحالة حقيقية."
     except Exception as e:
         logger.error(f"Error getting top 5 text for {user_id}: {e}", exc_info=True)
@@ -307,17 +313,16 @@ async def is_user_in_channel(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
     """Checks if a user is a member of the channel."""
     try:
         member = await context.bot.get_chat_member(chat_id=Config.CHANNEL_ID, user_id=user_id)
-        # Using a set for statuses is cleaner
         return member.status in {ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER}
     except BadRequest as e:
         if "user not found" in str(e).lower():
             return False
         else:
-            logger.error(f"Telegram BadRequest checking membership for {user_id} in channel {Config.CHANNEL_ID}: {e}. The bot might lack admin rights in the channel.")
-            return False # Assume not member on error
+            logger.error(f"Telegram BadRequest checking membership for {user_id}: {e}.")
+            return False
     except TelegramError as e:
         logger.warning(f"TelegramError checking membership for {user_id}: {e}")
-        return False # Assume not member on error
+        return False
     return False
 
 # --- Keyboard Functions ---
@@ -438,7 +443,6 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     logger.info(f"Received device_id {device_id} for user {user_id}. Verifying uniqueness...")
     try:
-        # Check if this device ID has been used by another user
         device_usage_res = await run_sync_db(lambda: supabase.table('referrals').select('referred_user_id').eq('device_id', device_id).neq('referred_user_id', user_id).limit(1).execute())
         if device_usage_res.data:
             original_user_id = device_usage_res.data[0].get('referred_user_id')
@@ -447,26 +451,42 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         referrer_id = context.user_data.get('referrer_id')
-        # Check if this user already has a referral record
         existing_ref_res = await run_sync_db(lambda: supabase.table('referrals').select('referred_user_id').eq('referred_user_id', user_id).single().execute())
 
-        # If it's a new user (no existing record) and they have a referrer, add a fake referral count
         if not existing_ref_res.data and referrer_id:
             await modify_referral_count(user_id=referrer_id, fake_delta=1)
             logger.info(f"New user {user_id} under referrer {referrer_id}. Added +1 fake referral.")
 
         await add_referral_mapping_in_db(user_id, referrer_id, device_id)
         
-        # --- MODIFICATION: Skip phone number, go directly to channel join ---
-        await update.message.reply_text("تم التحقق من جهازك بنجاح.", reply_markup=ReplyKeyboardRemove())
-        keyboard = [[InlineKeyboardButton("1. الانضمام للقناة", url=Config.CHANNEL_URL)], [InlineKeyboardButton("✅ لقد انضممت، تحقق الآن", callback_data=Callback.CONFIRM_JOIN)]]
-        await update.message.reply_text(Messages.JOIN_PROMPT, reply_markup=InlineKeyboardMarkup(keyboard))
+        # MODIFICATION: Reverted to asking for phone number
+        phone_button = [[KeyboardButton("اضغط هنا لمشاركة رقم هاتفك", request_contact=True)]]
+        await update.message.reply_text(Messages.PHONE_PROMPT, reply_markup=ReplyKeyboardMarkup(phone_button, resize_keyboard=True, one_time_keyboard=True))
         
     except Exception as e:
         logger.error(f"Error in web_app_data_handler for user {user_id}: {e}", exc_info=True)
         await update.message.reply_text(Messages.GENERIC_ERROR, reply_markup=ReplyKeyboardRemove())
 
-# REMOVED: handle_contact function is no longer needed.
+# MODIFICATION: Re-added handle_contact function
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.contact or update.effective_chat.type != Chat.PRIVATE: return
+    user_id = update.effective_user.id
+    logger.info(f"Received contact from user {user_id}")
+    contact = update.message.contact
+    if contact.user_id != user_id:
+        logger.warning(f"User {user_id} shared contact of another user ({contact.user_id})")
+        await update.message.reply_text(Messages.PHONE_INVALID, reply_markup=ReplyKeyboardRemove())
+        return
+    phone_number = contact.phone_number.lstrip('+')
+    if any(phone_number.startswith(code) for code in Config.ALLOWED_COUNTRY_CODES):
+        logger.info(f"User {user_id} has an allowed country code.")
+        await update.message.reply_text(Messages.PHONE_SUCCESS, reply_markup=ReplyKeyboardRemove())
+        keyboard = [[InlineKeyboardButton("1. الانضمام للقناة", url=Config.CHANNEL_URL)], [InlineKeyboardButton("✅ لقد انضممت، تحقق الآن", callback_data=Callback.CONFIRM_JOIN)]]
+        await update.message.reply_text(Messages.JOIN_PROMPT, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        logger.warning(f"User {user_id} has a disallowed country code: {phone_number}")
+        await update.message.reply_text(Messages.COUNTRY_NOT_ALLOWED, reply_markup=ReplyKeyboardRemove())
+        await ask_web_verification(update.message)
 
 async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     result = update.chat_member
@@ -483,12 +503,7 @@ async def handle_chat_member_updates(update: Update, context: ContextTypes.DEFAU
 
     logger.info(f"Chat member update for user {user.id} in chat {chat_id}. Was member: {was_member}, Is member: {is_member}")
 
-    if not was_member and is_member:
-        logger.info(f"User {user.id} joined channel {chat_id}.")
-        # No action needed on join, verification happens via button click
-        pass
-
-    elif was_member and not is_member:
+    if was_member and not is_member:
         logger.info(f"User {user.id} left/was kicked from chat {chat_id}.")
         db_user = await get_user_from_db(user.id)
         if db_user and db_user.get('is_verified'):
@@ -516,6 +531,8 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
     logger.info(f"Admin {user_id} sent message in state {state}: {text}")
     if not state or not text: return
 
+    context.user_data.pop('state', None) # Clear state after processing
+
     if state == State.AWAITING_BROADCAST_MESSAGE: await handle_broadcast_message(update, context)
     elif state == State.AWAITING_UNIVERSAL_BROADCAST_MESSAGE: await handle_universal_broadcast_message(update, context)
     elif state == State.AWAITING_INSPECT_USER_ID:
@@ -528,14 +545,12 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 await display_target_referrals_log(update.message, None, context, target_user_id, 'real', 1)
         except (ValueError, TypeError):
             await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
-        finally:
-            context.user_data.pop('state', None)
+
     elif state == State.AWAITING_EDIT_USER_ID:
         try:
             target_user_id = int(text)
             if not await get_user_from_db(target_user_id):
                 await update.message.reply_text(Messages.USER_NOT_FOUND, reply_markup=get_admin_panel_keyboard())
-                context.user_data.clear()
                 return
             context.user_data['state'] = State.AWAITING_EDIT_AMOUNT
             context.user_data['target_id'] = target_user_id
@@ -550,12 +565,11 @@ async def handle_admin_messages(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text(prompt, parse_mode=ParseMode.MARKDOWN)
         except (ValueError, TypeError):
             await update.message.reply_text(Messages.INVALID_INPUT, reply_markup=get_admin_panel_keyboard())
-            context.user_data.clear()
+
     elif state == State.AWAITING_EDIT_AMOUNT:
         target_user_id = context.user_data.get('target_id')
         action_type = context.user_data.get('action_type')
-        if not target_user_id or not action_type:
-            context.user_data.clear(); return
+        if not target_user_id or not action_type: return
         try:
             amount = int(text)
             if amount <= 0: raise ValueError("Amount must be positive")
@@ -602,7 +616,6 @@ async def handle_button_press_top5(query: CallbackQuery, context: ContextTypes.D
     except BadRequest as e:
         if "message is not modified" not in str(e).lower():
             logger.error(f"Top5 BadRequest for user {query.from_user.id}: {e}")
-            await query.message.reply_text(Messages.GENERIC_ERROR)
     except Exception as e:
         logger.error(f"Top5 general error for user {query.from_user.id}: {e}", exc_info=True)
         await query.message.reply_text(Messages.GENERIC_ERROR)
@@ -642,7 +655,6 @@ async def handle_confirm_join(query: CallbackQuery, context: ContextTypes.DEFAUL
             await query.message.reply_text(Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(user.id))
         else:
             await query.answer(text=Messages.JOIN_FAIL, show_alert=True)
-            # No need to edit the message if the user failed, they can just try again.
     except (TelegramError, BadRequest) as e:
         logger.error(f"Error during join confirmation for user {user.id}: {e}")
         await query.edit_message_text(Messages.GENERIC_ERROR + "\n\nتأكد من أن البوت لديه صلاحيات الأدمن في القناة.")
@@ -668,11 +680,12 @@ async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.D
         
         all_users = await get_all_users_from_db()
 
+        # FIX: Added a check to ensure user_id exists before processing
         if report_type == 'real':
-            filtered_users = sorted([u for u in all_users if u.get('total_real', 0) > 0], key=lambda u: u.get('total_real', 0), reverse=True)
+            filtered_users = sorted([u for u in all_users if u.get('user_id') and u.get('total_real', 0) > 0], key=lambda x: x.get('total_real', 0), reverse=True)
             title, count_key = "✅ *تقرير الإحالات الحقيقية*", 'total_real'
         else: # 'fake'
-            filtered_users = sorted([u for u in all_users if u.get('total_fake', 0) > 0], key=lambda u: u.get('total_fake', 0), reverse=True)
+            filtered_users = sorted([u for u in all_users if u.get('user_id') and u.get('total_fake', 0) > 0], key=lambda x: x.get('total_fake', 0), reverse=True)
             title, count_key = "⏳ *تقرير الإحالات الوهمية*", 'total_fake'
 
         if not filtered_users:
@@ -707,7 +720,6 @@ async def handle_admin_broadcast(query: CallbackQuery, context: ContextTypes.DEF
 async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message: return
     logger.info(f"Admin {update.effective_user.id} is sending a broadcast.")
-    context.user_data['state'] = None
     await update.message.reply_text("⏳ جاري إرسال الإذاعة...")
     verified_users = [u for u in await get_all_users_from_db() if u.get('is_verified')]
     sent, failed = 0, 0
@@ -717,7 +729,7 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
             sent += 1
         except TelegramError as e:
             logger.error(f"Failed broadcast to {user['user_id']}: {e}"); failed += 1
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05) # Small delay
     await update.message.reply_text(f"✅ اكتملت الإذاعة!\n\nتم الإرسال إلى: {sent}\nفشل الإرسال: {failed}")
 
 async def handle_admin_universal_broadcast(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -728,7 +740,6 @@ async def handle_admin_universal_broadcast(query: CallbackQuery, context: Contex
 async def handle_universal_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message: return
     logger.info(f"Admin {update.effective_user.id} is sending a universal broadcast.")
-    context.user_data['state'] = None
     await update.message.reply_text("⏳ جاري إرسال الإذاعة الشاملة...")
     all_users = await get_all_users_from_db()
     sent, failed = 0, 0
@@ -738,7 +749,7 @@ async def handle_universal_broadcast_message(update: Update, context: ContextTyp
             sent += 1
         except TelegramError as e:
             logger.error(f"Failed universal broadcast to {user['user_id']}: {e}"); failed += 1
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05) # Small delay
     await update.message.reply_text(f"✅ اكتملت الإذاعة الشاملة!\n\nتم الإرسال إلى: {sent}\nفشل الإرسال: {failed}")
 
 async def handle_booo_menu(query: CallbackQuery) -> None:
@@ -878,11 +889,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     if not query or not query.data or not query.from_user: return
     
-    # Using a general answer to prevent "Query is too old" if processing takes time
     try:
         await query.answer()
     except BadRequest:
-        # Ignore if query is too old to be answered
         pass
 
     action = query.data
@@ -919,7 +928,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         logger.error(f"An error occurred in button_handler for action {action} by user {user_id}: {e}", exc_info=True)
         try:
-            # Try to send a new message if editing fails
             await query.message.reply_text(Messages.GENERIC_ERROR)
         except Exception as inner_e:
             logger.error(f"Failed to send generic error message after initial handler error: {inner_e}")
@@ -945,20 +953,16 @@ def main() -> None:
     """Starts the bot."""
     application = Application.builder().token(Config.BOT_TOKEN).post_init(post_init).build()
 
-    # Group 0: Handle membership changes first
     application.add_handler(ChatMemberHandler(handle_chat_member_updates, ChatMemberHandler.CHAT_MEMBER), group=0)
-
-    # Group 1: Handle explicit commands and callbacks
     application.add_handler(CommandHandler("start", start_command), group=1)
     application.add_handler(CommandHandler("invites", my_referrals_command), group=1)
     application.add_handler(CommandHandler("link", link_command), group=1)
     application.add_handler(CommandHandler("top", top_command), group=1)
     application.add_handler(CallbackQueryHandler(button_handler), group=1)
 
-    # Group 2: Handle other message types in private chats
     private_filter = filters.ChatType.PRIVATE
-    # REMOVED: No longer need to handle contacts
-    # application.add_handler(MessageHandler(filters.CONTACT & private_filter, handle_contact), group=2)
+    # MODIFICATION: Re-added contact handler
+    application.add_handler(MessageHandler(filters.CONTACT & private_filter, handle_contact), group=2)
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA & private_filter, web_app_data_handler), group=2)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_filter, handle_admin_messages), group=2)
 
