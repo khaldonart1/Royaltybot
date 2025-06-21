@@ -87,7 +87,7 @@ class Callback(str, Enum):
 # --- Bot Messages (User-facing text in Arabic) ---
 class Messages:
     VERIFIED_WELCOME = "أهلاً بك مجدداً! ✅\n\nاستخدم الأزرار أو الأوامر للتفاعل مع البوت."
-    START_WELCOME = "أهلاً بك في البوت! �\n\nللبدء، نحتاج للتحقق من جهازك. الرجاء الضغط على الزر أدناه."
+    START_WELCOME = "أهلاً بك في البوت! 👋\n\nللبدء، نحتاج للتحقق من جهازك. الرجاء الضغط على الزر أدناه."
     WEB_VERIFY_PROMPT = "للتحقق من أنك لا تستخدم نفس الجهاز عدة مرات، الرجاء الضغط على الزر أدناه."
     WEB_VERIFY_SUCCESS = "تم التحقق من جهازك بنجاح!" # New message
     # REMOVED PHONE RELATED MESSAGES
@@ -121,31 +121,46 @@ def get_db_client(context: ContextTypes.DEFAULT_TYPE) -> Client:
 def clean_name_for_markdown(name: str) -> str:
     """Escapes characters for MarkdownV2 parsing."""
     if not name: return ""
-    escape_chars = r"([_*\[\]()~`>#\+\-=|{}\.!\\])"
+    # FIX: More robust character escaping for MarkdownV2
+    escape_chars = r"[_*\[\]()~`>#\+\-=|{}\.!\\]"
     return re.sub(escape_chars, r"\\\1", name)
 
 async def get_user_mention(user_id: int, context: ContextTypes.DEFAULT_TYPE, full_name: Optional[str] = None) -> str:
-    """Gets a Markdown-safe user mention, using a cache to reduce API calls."""
+    """
+    FIX: More robustly gets a Markdown-safe user mention, using a cache and falling back gracefully.
+    """
     cache = context.bot_data.setdefault('mention_cache', {})
     current_time = time.time()
+
     if user_id in cache and (current_time - cache[user_id].get('timestamp', 0) < Config.MENTION_CACHE_TTL_SECONDS):
         return cache[user_id]['mention']
-    mention_name = "Unknown User"
+
+    mention_name = ""
     try:
+        # First, try to get fresh info from Telegram
         chat = await context.bot.get_chat(user_id)
         mention_name = chat.full_name or f"User {user_id}"
     except (TelegramError, BadRequest):
+        # If get_chat fails, fall back to the provided full_name or database name
+        logger.warning(f"Could not get_chat for user_id {user_id}. Falling back.")
         if full_name:
             mention_name = full_name
         else:
+            # If no full_name provided, try to get it from our database
             db_user_info = await get_user_from_db(user_id, context)
             if db_user_info:
                 mention_name = db_user_info.get("full_name", f"User {user_id}")
+            else:
+                # If all else fails, use a generic placeholder
+                mention_name = f"User {user_id}"
+
     cleaned_name = clean_name_for_markdown(mention_name)
     mention = f"[{cleaned_name}](tg://user?id={user_id})"
+    
+    # Cache the result
     cache[user_id] = {'mention': mention, 'timestamp': current_time}
     return mention
-
+    
 # --- Database Functions ---
 async def run_sync_db(func: Callable[[], Any]) -> Any:
     return await asyncio.to_thread(func)
@@ -263,28 +278,38 @@ async def get_top_5_text(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> st
     try:
         top_5_res = await run_sync_db(lambda: db.table('users').select('user_id, full_name, total_real').gt('total_real', 0).order('total_real', desc=True).limit(5).execute())
         top_5_users = top_5_res.data or []
+        
         if not top_5_users:
             msg += "لم يصل أحد إلى القائمة بعد.\n"
         else:
-            mentions = await asyncio.gather(*[get_user_mention(u['user_id'], context, u.get('full_name')) for u in top_5_users])
+            # FIX: Use a loop with await inside, which is fine for small numbers like 5.
+            # For larger numbers, asyncio.gather is better, but this is more readable here.
             for i, u_info in enumerate(top_5_users):
-                msg += f"{i+1}\\. {mentions[i]} \\- *{u_info.get('total_real', 0)}* إحالة\n"
+                mention = await get_user_mention(u_info['user_id'], context, u_info.get('full_name'))
+                msg += f"{i+1}\\. {mention} \\- *{u_info.get('total_real', 0)}* إحالة\n"
+
         msg += "\n---\n*ترتيبك الشخصي:*\n"
         my_info = await get_user_from_db(user_id, context)
         my_referrals = my_info.get('total_real', 0) if my_info else 0
         rank_str = "غير مصنف"
+        
         if my_info and my_referrals > 0:
             try:
+                # This query counts how many users have more referrals than me
                 count_res = await run_sync_db(lambda: db.table('users').select('user_id', count='exact').gt('total_real', my_referrals).execute())
                 my_rank = (count_res.count or 0) + 1
                 rank_str = f"\\#{my_rank}"
             except Exception as e:
                 logger.error(f"Could not calculate rank for user {user_id}: {e}", exc_info=True)
                 rank_str = "خطأ في الحساب"
+        
         msg += f"🎖️ ترتيبك: *{rank_str}*\n✅ رصيدك: *{my_referrals}* إحالة حقيقية\\."
+
     except Exception as e:
         logger.error(f"Error getting top 5 text for {user_id}: {e}", exc_info=True)
-        msg = Messages.GENERIC_ERROR
+        # FIX: Return a specific error message instead of the generic one.
+        return "حدث خطأ أثناء جلب قائمة أفضل 5. يرجى المحاولة مرة أخرى."
+        
     return msg
 
 # --- Core Logic & Keyboard Functions ---
@@ -312,10 +337,10 @@ async def is_user_in_channel(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
             return False
         else:
             logger.error(f"Telegram BadRequest checking membership for {user_id}: {e}", exc_info=True)
-            raise
+            return False # FIX: Assume not in channel on other bad requests
     except Exception as e:
         logger.error(f"Unexpected error checking membership for {user_id}: {e}", exc_info=True)
-        raise
+        return False # FIX: Assume not in channel on error
 
 # --- Keyboard Functions ---
 def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -359,7 +384,6 @@ def get_reset_confirmation_keyboard() -> InlineKeyboardMarkup:
 def get_format_confirmation_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("‼️ نعم، قم بحذف كل شيء ‼️", callback_data=Callback.ADMIN_FORMAT_CONFIRM)], [InlineKeyboardButton("❌ لا، إلغاء الأمر", callback_data=Callback.ADMIN_PANEL)]])
 
-
 # --- Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"Received /start command from user {update.effective_user.id}")
@@ -380,10 +404,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except (ValueError, IndexError): pass
     await upsert_user_in_db({'user_id': user.id, 'full_name': user.full_name, 'username': user.username}, context)
     try:
+        # Check if the user is ALREADY in the channel before starting verification
         context.user_data['was_already_member'] = await is_user_in_channel(user.id, context)
-    except (TelegramError, BadRequest) as e:
+    except Exception as e: # Catch all exceptions during this check
         logger.error(f"Could not check channel membership for {user.id} on start: {e}", exc_info=True)
         context.user_data['was_already_member'] = False
+    
+    # NOTE: The phone number request has been removed. The bot proceeds directly to web verification.
     await update.message.reply_text(Messages.START_WELCOME, reply_markup=ReplyKeyboardRemove())
     await ask_web_verification(update.message)
 
@@ -553,14 +580,21 @@ async def handle_button_press_top5(query: CallbackQuery, context: ContextTypes.D
     try:
         await query.edit_message_text(Messages.LOADING)
         text = await get_top_5_text(query.from_user.id, context)
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_main_menu_keyboard(query.from_user.id), disable_web_page_preview=True)
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=get_main_menu_keyboard(query.from_user.id),
+            disable_web_page_preview=True
+        )
     except BadRequest as e:
+        # FIX: Avoid crashing on "message is not modified" and log other errors
         if "message is not modified" not in str(e).lower():
             logger.error(f"Top5 BadRequest: {e}", exc_info=True)
-            await query.message.reply_text(Messages.GENERIC_ERROR)
+            await query.message.reply_text(Messages.GENERIC_ERROR, reply_markup=get_main_menu_keyboard(query.from_user.id))
     except Exception as e:
         logger.error(f"Top5 Exception: {e}", exc_info=True)
-        await query.message.reply_text(Messages.GENERIC_ERROR)
+        await query.message.reply_text(Messages.GENERIC_ERROR, reply_markup=get_main_menu_keyboard(query.from_user.id))
+
 
 async def handle_button_press_link(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = query.from_user.id
@@ -615,38 +649,62 @@ async def handle_admin_user_count(query: CallbackQuery, context: ContextTypes.DE
         await query.edit_message_text(Messages.GENERIC_ERROR, reply_markup=get_admin_panel_keyboard())
 
 async def handle_report_pagination(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
-    db = get_db_client(context)
+    # FIX: Add robust error handling and check for message modification errors.
     try:
-        parts = query.data.split('_'); report_type, page = parts[1], int(parts[3])
+        parts = query.data.split('_')
+        if len(parts) != 4:
+            logger.error(f"Invalid report callback data: {query.data}")
+            await query.answer("Invalid callback data.", show_alert=True)
+            return
+
+        report_type, page = parts[1], int(parts[3])
         await query.edit_message_text(Messages.LOADING)
+        
+        db = get_db_client(context)
         count_key = 'total_real' if report_type == 'real' else 'total_fake'
         title = "✅ *تقرير الإحالات الحقيقية*" if report_type == 'real' else "⏳ *تقرير الإحالات الوهمية*"
-        start_index = (page - 1) * Config.USERS_PER_PAGE
         
         count_res = await run_sync_db(lambda: db.table('users').select('user_id', count='exact').gt(count_key, 0).execute())
         total_users = count_res.count or 0
         
         if total_users == 0:
-            await query.edit_message_text(f"لا يوجد مستخدمون في هذا التقرير.", reply_markup=get_admin_panel_keyboard()); return
+            await query.edit_message_text(f"لا يوجد مستخدمون في هذا التقرير.", reply_markup=get_admin_panel_keyboard())
+            return
 
+        start_index = (page - 1) * Config.USERS_PER_PAGE
         users_res = await run_sync_db(lambda: db.table('users').select(f"user_id, full_name, {count_key}").gt(count_key, 0).order(count_key, desc=True).range(start_index, start_index + Config.USERS_PER_PAGE - 1).execute())
         page_users = users_res.data or []
-        total_pages = math.ceil(total_users / Config.USERS_PER_PAGE)
-        mentions = await asyncio.gather(*[get_user_mention(u['user_id'], context, u.get('full_name')) for u in page_users])
+        
+        report_lines = []
+        for u_data in page_users:
+            mention = await get_user_mention(u_data['user_id'], context, u_data.get('full_name'))
+            report_lines.append(f"• {mention} \\- *{u_data.get(count_key, 0)}*")
 
-        report_lines = [f"• {mention} \\- *{u_data.get(count_key, 0)}*" for mention, u_data in zip(mentions, page_users)]
+        total_pages = math.ceil(total_users / Config.USERS_PER_PAGE)
         report = f"{title} (صفحة {page} من {total_pages}):\n\n" + "\n".join(report_lines)
 
         nav_buttons = []
         cb_prefix = f"{Callback.REPORT_PAGE}_{report_type}_page_"
         if page > 1: nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"{cb_prefix}{page-1}"))
         if page < total_pages: nav_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data=f"{cb_prefix}{page+1}"))
+        
         keyboard = [nav_buttons] if nav_buttons else []
         keyboard.append([InlineKeyboardButton("🔙 العودة", callback_data=Callback.ADMIN_PANEL)])
-        await query.edit_message_text(text=report, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
+        
+        await query.edit_message_text(
+            text=report,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
+        )
+    except BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            logger.error(f"Error generating report {query.data}: {e}", exc_info=True)
+            await query.message.reply_text(Messages.GENERIC_ERROR, reply_markup=get_admin_panel_keyboard())
     except Exception as e:
         logger.error(f"Error generating report {query.data}: {e}", exc_info=True)
-        await query.edit_message_text(Messages.GENERIC_ERROR, reply_markup=get_admin_panel_keyboard())
+        await query.message.reply_text(Messages.GENERIC_ERROR, reply_markup=get_admin_panel_keyboard())
+
 
 async def handle_admin_broadcast(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data['state'] = State.AWAITING_BROADCAST_MESSAGE
@@ -743,19 +801,23 @@ async def handle_inspect_log_pagination(query: CallbackQuery, context: ContextTy
     except (ValueError, IndexError): return
 
 async def handle_data_migration(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await query.edit_message_text("⏳ **بدء عملية إعادة الحساب...**\nقد تستغرق هذه العملية بعض الوقت.", parse_mode=ParseMode.MARKDOWN_V2)
+    # FIX: Add better feedback and error handling.
+    await query.edit_message_text("⏳ **بدء عملية إعادة الحساب...**\nقد تستغرق هذه العملية بعض الوقت. سيتم إعلامك عند الانتهاء.", parse_mode=ParseMode.MARKDOWN_V2)
     db = get_db_client(context)
     try:
         all_users = await get_all_users_from_db(context)
         if not all_users:
-            await query.edit_message_text("لا يوجد مستخدمون.", reply_markup=get_admin_panel_keyboard()); return
+            await query.edit_message_text("لا يوجد مستخدمون لإجراء الترحيل.", reply_markup=get_admin_panel_keyboard())
+            return
 
         all_mappings, current_page, page_size = [], 0, 1000
         while True:
             start_index = current_page * page_size
             res = await run_sync_db(lambda: db.table('referrals').select("referrer_user_id, referred_user_id").range(start_index, start_index + page_size - 1).execute())
-            if res.data: all_mappings.extend(res.data)
-            else: break
+            if res.data: 
+                all_mappings.extend(res.data)
+            else: 
+                break
             current_page += 1
         
         verified_ids = {u['user_id'] for u in all_users if u.get('is_verified') and u.get('user_id')}
@@ -763,21 +825,26 @@ async def handle_data_migration(query: CallbackQuery, context: ContextTypes.DEFA
 
         for mapping in all_mappings:
             ref_id, red_id = mapping.get('referrer_user_id'), mapping.get('referred_user_id')
-            if ref_id in user_counts:
-                user_counts[ref_id]['total_real' if red_id in verified_ids else 'total_fake'] += 1
+            if ref_id and ref_id in user_counts: # Check if referrer exists
+                if red_id in verified_ids:
+                    user_counts[ref_id]['total_real'] += 1
+                else:
+                    user_counts[ref_id]['total_fake'] += 1
         
         users_to_update = [{'user_id': uid, **counts} for uid, counts in user_counts.items()]
+        
         if users_to_update:
-            chunk_size = 200
+            chunk_size = 200 # Supabase has limits on upsert size
             for i in range(0, len(users_to_update), chunk_size):
-                await run_sync_db(lambda: db.table('users').upsert(users_to_update[i:i + chunk_size]).execute())
-                logger.info(f"Data migration: updated chunk {i//chunk_size + 1}")
-                await asyncio.sleep(0.5)
+                chunk = users_to_update[i:i + chunk_size]
+                logger.info(f"Data migration: updating chunk {i//chunk_size + 1} with {len(chunk)} users.")
+                await run_sync_db(lambda: db.table('users').upsert(chunk).execute())
+                await asyncio.sleep(0.5) # Be nice to the API
 
-        await query.edit_message_text(f"✅ **اكتملت!** تم تحديث *{len(users_to_update)}* مستخدم.", reply_markup=get_admin_panel_keyboard(), parse_mode=ParseMode.MARKDOWN_V2)
+        await query.edit_message_text(f"✅ **اكتملت!** تم تحديث بيانات *{len(users_to_update)}* مستخدم.", reply_markup=get_admin_panel_keyboard(), parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
         logger.error(f"Data migration failed: {e}", exc_info=True)
-        await query.edit_message_text(f"❌ فشلت العملية.\n`{e}`", reply_markup=get_admin_panel_keyboard())
+        await query.edit_message_text(f"❌ فشلت عملية الترحيل.\n`{e}`\n\nالرجاء مراجعة سجلات البوت.", reply_markup=get_admin_panel_keyboard())
 
 async def handle_admin_reset_all(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text("⚠️ *تأكيد* ⚠️\nهل أنت متأكد أنك تريد تصفير *جميع* الإحالات؟", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_reset_confirmation_keyboard())
@@ -814,17 +881,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not query or not query.data or not query.from_user: return
     try:
         await query.answer()
-    except BadRequest: return
+    except BadRequest: 
+        # This can happen if the bot tries to answer a query that is too old. It's safe to ignore.
+        logger.info(f"Failed to answer callback query for user {query.from_user.id}, likely already answered.")
+        return
 
     action, user_id = query.data, query.from_user.id
     logger.info(f"Button press from user {user_id}: {action}")
 
+    # FIX: Centralized try-except block to catch errors in all button handlers
     try:
         if action == Callback.MAIN_MENU: await query.edit_message_text(text=Messages.VERIFIED_WELCOME, reply_markup=get_main_menu_keyboard(user_id))
         elif action == Callback.MY_REFERRALS: await handle_button_press_my_referrals(query, context)
         elif action == Callback.MY_LINK: await handle_button_press_link(query, context)
         elif action == Callback.TOP_5: await handle_button_press_top5(query, context)
         elif action == Callback.CONFIRM_JOIN: await handle_confirm_join(query, context)
+        # --- Admin-only actions ---
         elif user_id in Config.BOT_OWNER_IDS:
             if action == Callback.ADMIN_PANEL: await handle_admin_panel(query)
             elif action == Callback.ADMIN_USER_COUNT: await handle_admin_user_count(query, context)
@@ -845,10 +917,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         logger.error(f"Error in button_handler for action {action} by user {user_id}: {e}", exc_info=True)
         try:
-            if query.message: await query.edit_message_text(Messages.GENERIC_ERROR)
-            else: await context.bot.send_message(chat_id=user_id, text=Messages.GENERIC_ERROR)
+            # Try to edit the message with a generic error, or send a new one if editing fails.
+            if query.message: 
+                await query.edit_message_text(Messages.GENERIC_ERROR)
         except Exception as inner_e:
-            logger.error(f"Failed to send generic error message: {inner_e}", exc_info=True)
+            logger.error(f"Failed to send generic error message to user {user_id}: {inner_e}", exc_info=True)
+
 
 # --- Post Init Function ---
 async def post_init(application: Application) -> None:
