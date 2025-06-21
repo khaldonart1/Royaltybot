@@ -337,7 +337,7 @@ def get_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 تقرير حقيقي", callback_data=f"{Callback.REPORT_PAGE}_real_page_1"), InlineKeyboardButton("⏳ تقرير وهمي", callback_data=f"{Callback.REPORT_PAGE}_fake_page_1")],
+        [InlineKeyboardButton("📊 تقرير حقيقي", callback_data=f"{Callback.REPORT_PAGE}_real_1"), InlineKeyboardButton("⏳ تقرير وهمي", callback_data=f"{Callback.REPORT_PAGE}_fake_1")],
         [InlineKeyboardButton("🔍 فحص إحالات مستخدم", callback_data=Callback.ADMIN_INSPECT_REFERRALS)],
         [InlineKeyboardButton("👥 عدد المستخدمين", callback_data=Callback.ADMIN_USER_COUNT)],
         [InlineKeyboardButton("Booo 👾 (تعديل يدوي)", callback_data=Callback.ADMIN_BOOO_MENU)],
@@ -704,9 +704,9 @@ async def display_report_page(query: CallbackQuery, context: ContextTypes.DEFAUL
         keyboard = []
         row = []
         if page > 1:
-            row.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"{Callback.REPORT_PAGE}_{report_type}_page_{page-1}"))
+            row.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"{Callback.REPORT_PAGE}_{report_type}_{page-1}"))
         if page < total_pages:
-            row.append(InlineKeyboardButton("التالي ➡️", callback_data=f"{Callback.REPORT_PAGE}_{report_type}_page_{page+1}"))
+            row.append(InlineKeyboardButton("التالي ➡️", callback_data=f"{Callback.REPORT_PAGE}_{report_type}_{page+1}"))
         if row: keyboard.append(row)
         keyboard.append([InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data=Callback.ADMIN_PANEL)])
 
@@ -892,7 +892,8 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         if data == Callback.ADMIN_PANEL: await query.edit_message_text(Messages.ADMIN_WELCOME, reply_markup=get_admin_panel_keyboard())
         elif data.startswith(f"{Callback.REPORT_PAGE}_"):
             try:
-                _, report_type, _, page_str = data.split('_')
+                # Format: "report_real_1"
+                _, report_type, page_str = data.split('_')
                 await display_report_page(query, context, report_type, int(page_str))
             except (ValueError, IndexError) as e: logger.error(f"Could not parse report callback data '{data}': {e}")
         elif data == Callback.ADMIN_USER_COUNT: await handle_admin_user_count(query)
